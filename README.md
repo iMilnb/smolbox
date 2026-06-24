@@ -15,9 +15,12 @@ ln -s smolbox ls && ./ls # symlink (BusyBox-style)
 
 | Tool      | Path         | Reference                      |
 |-----------|--------------|--------------------------------|
+| `cp`      | `bin/cp/`    | NetBSD `bin/cp`                |
 | `init`    | `sbin/init/` | NetBSD `sbin/init`             |
+| `ln`      | `bin/ln/`    | NetBSD `bin/ln`                |
 | `ls`      | `bin/ls/`    | NetBSD `bin/ls`                |
 | `mount`   | `sbin/mount/`| NetBSD `sbin/mount` / `mount_ffs` |
+| `rm`      | `bin/rm/`    | NetBSD `bin/rm`                |
 | `sh`      | `bin/sh/`    | 4.3BSD Reno `sh`               |
 | `sysctl`  | `sbin/sysctl/`| NetBSD `sbin/sysctl`          |
 

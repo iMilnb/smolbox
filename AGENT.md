@@ -67,6 +67,14 @@ sbin/sysctl/           ← sysctl.c (standalone)
 
 ## Per-Tool Details
 
+### cp (`bin/cp/cp.c`, 310 lines)
+
+- Flags: `-f` (force), `-i` (interactive), `-p` (preserve mode/times), `-r` (recursive), `-v` (verbose)
+- `copy_one()` dispatches to `copy_file()` or `copy_dir()` based on source type
+- `copy_file()`: 32KB buffer, `open`/`read`/`write` loop
+- `copy_dir()`: `opendir`/`readdir` recursion, skips `.`/`..`
+- **Gotcha**: save source `S_ISDIR` before `lstat(target)` overwrites `sb`
+
 ### init (`sbin/init/init.c`, 939 lines)
 
 - State machine: `single_user → runcom → read_ttys → multi_user`
@@ -75,6 +83,13 @@ sbin/sysctl/           ← sysctl.c (standalone)
 - Uses `<err.h>` (`err`, `errx`, `warn`) and `<util.h>` (`login_tty`, `setlogin`)
 - `pathnames.h`: `_PATH_CONSOLE`, `_PATH_BSHELL`, `_PATH_TTYS`, `_PATH_RUNCOM`, `_PATH_STDPATH`
 - **Gotcha**: `init` never returns from `main_init()` — it loops through states forever
+
+### ln (`bin/ln/ln.c`, 170 lines)
+
+- Flags: `-f` (force), `-h`/`-n` (don't follow symlink target), `-s` (symbolic link)
+- `linkit()` handles single link: checks target-is-directory, appends basename, unlinks with `-f`
+- Multi-source: last argument must be an existing directory
+- Default hard link, `-s` for symbolic
 
 ### ls (`bin/ls/ls.c`, 439 lines)
 
@@ -92,6 +107,14 @@ sbin/sysctl/           ← sysctl.c (standalone)
 - Features: list mounts (`getmntinfo`), mount fstab (`-a`), remount (`-u`)
 - `pathnames.h`: `_PATH_FSTAB`, `_PATH_MOUNTED`, `_PATH_MOUNTDPID`
 - **Gotcha**: `struct ufs_args` include must come AFTER `<sys/mount.h>`
+
+### rm (`bin/rm/rm.c`, 200 lines)
+
+- Flags: `-d` (remove dirs), `-f` (force), `-i` (interactive), `-r` (recursive), `-v` (verbose)
+- `remove_one()` dispatches to `remove_dir()` for directories, `unlink()` for files
+- `remove_dir()`: `opendir`/`readdir` recursion, removes contents then `rmdir()`
+- Skips `.` and `..` (POSIX requirement)
+- `-f` ignores nonexistent files and suppresses prompts
 
 ### sh (`bin/sh/`, 3590 lines, 8 .c + 1 .h)
 
