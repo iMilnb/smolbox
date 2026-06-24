@@ -189,11 +189,20 @@ main_init(int argc, char **argv)
 	(void)sigaction(SIGTTOU, &sa, NULL);
 
 	/*
-	 * Paranoia - close std file descriptors.
+	 * Open console for stdio so that error messages are visible.
 	 */
-	(void)close(0);
-	(void)close(1);
-	(void)close(2);
+	{
+		int confd;
+
+		confd = open(_PATH_CONSOLE, O_RDWR);
+		if (confd >= 0) {
+			(void)dup2(confd, 0);
+			(void)dup2(confd, 1);
+			(void)dup2(confd, 2);
+			if (confd > 2)
+				(void)close(confd);
+		}
+	}
 
 	/*
 	 * Start the state machine.
