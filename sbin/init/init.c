@@ -562,6 +562,9 @@ read_ttys(void)
 			sp = snext;
 	(void)endttyent();
 
+	if (sessions == NULL)
+		return (state_func_t)single_user;
+
 	return (state_func_t)multi_user;
 }
 
