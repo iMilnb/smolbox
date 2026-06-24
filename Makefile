@@ -4,7 +4,10 @@ PROG=	smolbox
 MAN=	
 SRCS=	smolbox.c \
 	sbin/init/init.c \
+	bin/cp/cp.c \
 	bin/ls/ls.c \
+	bin/ln/ln.c \
+	bin/rm/rm.c \
 	sbin/mount/mount.c \
 	sbin/sysctl/sysctl.c \
 	bin/sh/sh.c \

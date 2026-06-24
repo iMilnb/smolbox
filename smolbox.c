@@ -29,9 +29,12 @@
 #include <string.h>
 
 /* Tool entry points. */
+extern int main_cp(int, char *[]);
 extern int main_init(int, char **);
+extern int main_ln(int, char *[]);
 extern int main_ls(int, char *[]);
 extern int main_mount(int, char *[]);
+extern int main_rm(int, char *[]);
 extern int main_sh(int, char *[]);
 extern int main_sysctl(int, char *[]);
 
@@ -41,9 +44,12 @@ struct app {
 };
 
 static const struct app apps[] = {
+	{"cp",		main_cp},
 	{"init",	main_init},
+	{"ln",		main_ln},
 	{"ls",		main_ls},
 	{"mount",	main_mount},
+	{"rm",		main_rm},
 	{"sh",		main_sh},
 	{"sysctl",	main_sysctl},
 };
@@ -54,9 +60,12 @@ static const char usage_msg[] =
 "usage: smolbox <command> [args...]\n"
 "\n"
 "available commands:\n"
+"  cp      minimal cp(1)\n"
 "  init    minimal init(8)\n"
+"  ln      minimal ln(1)\n"
 "  ls      minimal ls(1)\n"
 "  mount   minimal mount(8)\n"
+"  rm      minimal rm(1)\n"
 "  sh      minimal POSIX-ish shell\n"
 "  sysctl  minimal sysctl(8)\n";
 
