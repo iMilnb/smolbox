@@ -340,6 +340,31 @@ transition(state_t s)
 }
 
 /*
+ * Log a message to the console, then stall().
+ *
+ * Only used by init's children, which run before syslogd exists;
+ * vsyslog() alone would be lost, so also write to the console.
+ */
+static void
+report_console_err(const char *message, ...)
+{
+	va_list ap;
+	FILE *f;
+	int fd;
+
+	va_start(ap, message);
+	if ((fd = open(_PATH_CONSOLE, O_WRONLY)) != -1 &&
+	    (f = fdopen(fd, "w")) != NULL) {
+		(void)fprintf(f, "init: ");
+		(void)vfprintf(f, message, ap);
+		(void)fputc('\n', f);
+		(void)fflush(f);
+	}
+	stall(message, ap);
+	va_end(ap);
+}
+
+/*
  * Start a session and allocate a controlling terminal.
  * Only called by children of init after forking.
  */
@@ -350,9 +375,19 @@ setctty(const char *name)
 
 	(void)revoke(name);
 	if ((fd = open(name, O_RDWR)) == -1) {
-		stall("can't open %s: %m", name);
+		/*
+		 * The constant console can be missing from /dev at early
+		 * boot; fall back to the console proper before giving up.
+		 */
+		if (strcmp(name, _PATH_CONSOLE) != 0) {
+			(void)revoke(_PATH_CONSOLE);
+			if ((fd = open(_PATH_CONSOLE, O_RDWR)) != -1)
+				goto gotctty;
+		}
+		report_console_err("can't open %s: %m", name);
 		_exit(1);
 	}
+gotctty:
 	if (login_tty(fd) == -1) {
 		stall("can't get %s for controlling terminal: %m", name);
 		_exit(2);

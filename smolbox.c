@@ -98,6 +98,13 @@ main(int argc, char *argv[])
 		argv++;
 	}
 
+	/*
+	 * A login shell is exec'ed with argv[0] prefixed by '-'
+	 * (e.g. init execs /bin/sh as "-sh"); strip it before matching.
+	 */
+	while (*base == '-')
+		base++;
+
 	/* Look up the tool by name. */
 	for (i = 0; i < NAPP; i++) {
 		if (strcmp(apps[i].name, base) == 0) {

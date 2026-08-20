@@ -19,7 +19,8 @@ struct app { const char *name; int (*entry)(int, char *[]); };
 1. Extract basename from `argv[0]` (after last `/`)
 2. If basename is `"smolbox"`, command is `argv[1]` (shift argc/argv)
 3. If basename matches a tool name (symlink), use it directly
-4. Call `main_<tool>(argc, argv)`
+4. Strip leading `-` from basename (login-shell convention, e.g. init execs `-sh`)
+5. Call `main_<tool>(argc, argv)`
 
 Each tool's entry point is `main_<name>()`, NOT `main()`.
 
@@ -83,6 +84,8 @@ sbin/sysctl/           ← sysctl.c (standalone)
 - Uses `<err.h>` (`err`, `errx`, `warn`) and `<util.h>` (`login_tty`, `setlogin`)
 - `pathnames.h`: `_PATH_CONSOLE`, `_PATH_BSHELL`, `_PATH_TTYS`, `_PATH_RUNCOM`, `_PATH_STDPATH`
 - **Gotcha**: `init` never returns from `main_init()` — it loops through states forever
+- **Gotcha**: single-user shell is exec'd with `argv[0] = "-sh"` (login convention); the dispatcher strips leading dashes, otherwise the shell exits "unknown command" and init silently loops single_user↔runcom
+- **Gotcha**: before syslogd exists, `vsyslog()` is lost; `setctty()` falls back constty→console and `report_console_err()` writes failures straight to the console, or boot appears to hang
 
 ### ln (`bin/ln/ln.c`, 170 lines)
 
