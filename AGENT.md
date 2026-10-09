@@ -66,7 +66,7 @@ tests/                 ← run.sh (guest driver), run-vm.sh (host), t_<tool>.sh
 - **Function declarations**: `static type name(args)` with prototypes at top of file
 - **Comments**: `/* */` style, `__attribute__((__noreturn__))` for usage functions
 - **Headers**: `#ifndef _TOOL_PATHNAMES_H_` guards, include `<sys/param.h>` first
-- **Copyright**: `Copyright (c) 2026 Emile 'iMil' Heitor & Qwen3.6 + Crush.`
+- **Copyright**: `Copyright (c) 2026 Emile 'iMil' Heitor & Qwen3.8 Flash Next + maki.`
 
 ## Per-Tool Details
 

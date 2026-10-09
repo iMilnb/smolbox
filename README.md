@@ -74,4 +74,4 @@ for details.
 
 ## License
 
-BSD 2-clause. Copyright (c) 2026 Emile 'iMil' Heitor & Qwen3.6 + Crush.
+BSD 2-clause. Copyright (c) 2026 Emile 'iMil' Heitor & Qwen3.8 Flash Next + maki.
