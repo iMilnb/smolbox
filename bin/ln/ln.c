@@ -51,7 +51,7 @@ main_ln(int argc, char *argv[])
 	const char	*targetdir;
 	int		 ch, exitval;
 
-	while ((ch = getopt(argc, argv, "fhns")) != -1)
+	while ((ch = getopt(argc, argv, "fhsv")) != -1)
 		switch (ch) {
 		case 'f':
 			f_flag = 1;
@@ -64,6 +64,9 @@ main_ln(int argc, char *argv[])
 			break;
 		case 's':
 			s_flag = 1;
+			break;
+		case 'v':
+			v_flag = 1;
 			break;
 		default:
 			usage();

@@ -51,6 +51,7 @@ const char		*shell_name = "sh";
 static volatile sig_atomic_t	child_status = 0;
 static volatile sig_atomic_t	interrupted = 0;
 bool				xtrace = false;
+bool				noexec = false;
 static bool			ignoreeof = false;
 static bool			verbose = false;
 
@@ -59,7 +60,8 @@ struct lexer		lexer;
 
 static void	 handle_signal(int);
 static void	 handle_child(int);
-static void	 usage(void);
+static void	 usage(void) __attribute__((__noreturn__));
+static int	 run_text(const char *);
 static int	 execute_script(const char *);
 static int	 read_eval_loop(void);
 static char	*read_line(const char *);
@@ -73,7 +75,7 @@ main_sh(int argc, char *argv[])
 {
 	struct sigaction	sa;
 	sigset_t		mask;
-	int			c, flags;
+	int			c;
 
 	shell_pid = getpid();
 	interactive = isatty(STDIN_FILENO) && isatty(STDERR_FILENO);
@@ -107,14 +109,13 @@ main_sh(int argc, char *argv[])
 	 */
 	builtin_init();
 
-	flags = 0;
-	while ((c = getopt(argc, argv, "+:c:imnv")) != -1)
+	while ((c = getopt(argc, argv, "+:c:imnxv")) != -1)
 		switch (c) {
 		case 'c':
 			/* Command string mode. */
 			var_init();
 			var_set("0", shell_name);
-			return execute_script(optarg);
+			return run_text(optarg);
 		case 'i':
 			interactive = true;
 			break;
@@ -123,7 +124,7 @@ main_sh(int argc, char *argv[])
 			break;
 		case 'n':
 			/* No-exec mode: parse only. */
-			flags |= 1;
+			noexec = true;
 			break;
 		case 'v':
 			verbose = true;
@@ -151,7 +152,9 @@ main_sh(int argc, char *argv[])
 	 * If arguments remain, treat first as a script.
 	 */
 	if (argc > 0) {
-		var_set_positional(argc, argv);
+		/* $0 is the script name (set by execute_script); the
+		 * remaining arguments become $1, $2, ... */
+		var_set_positional(argc - 1, argv + 1);
 		return execute_script(argv[0]);
 	}
 
@@ -201,11 +204,21 @@ read_eval_loop(void)
 			(void)fprintf(stderr, "%s\n", line);
 		}
 
+		parse_error = 0;
 		lexer_init(&lexer, line);
 		lexer_next(&lexer);
 
 		tree = parse_command(&lexer, NULL);
 		free(line);
+
+		if (parse_error) {
+			(void)fprintf(stderr, "%s: syntax error\n",
+			    shell_name);
+			if (tree != NULL)
+				cmd_free(tree);
+			exit_status = 2;
+			continue;
+		}
 
 		if (tree != NULL) {
 			exit_status = execute(tree);
@@ -220,13 +233,42 @@ read_eval_loop(void)
 }
 
 /*
+ * Parse and execute a command string held in memory.
+ */
+static int
+run_text(const char *text)
+{
+	struct cmd	*tree;
+	int		 status;
+
+	parse_error = 0;
+	lexer_init(&lexer, text);
+	lexer_next(&lexer);
+
+	tree = parse_command(&lexer, NULL);
+
+	status = 0;
+	if (parse_error) {
+		(void)fprintf(stderr, "%s: syntax error\n", shell_name);
+		if (tree != NULL)
+			cmd_free(tree);
+		return 2;
+	}
+	if (tree != NULL) {
+		if (!noexec)
+			status = execute(tree);
+		cmd_free(tree);
+	}
+	return status;
+}
+
+/*
  * Execute a script file.
  */
 static int
 execute_script(const char *path)
 {
 	int		fd;
-	struct cmd	*tree;
 	off_t		size;
 	ssize_t		n;
 	char		*buf;
@@ -261,20 +303,11 @@ execute_script(const char *path)
 	buf[n] = '\0';
 
 	executing_script = true;
-	var_set("0", executing_script ? path : shell_name);
+	var_set("0", path);
 
-	lexer_init(&lexer, buf);
-	lexer_next(&lexer);
+	status = run_text(buf);
 
-	tree = parse_command(&lexer, NULL);
 	free(buf);
-
-	status = 0;
-	if (tree != NULL) {
-		status = execute(tree);
-		cmd_free(tree);
-	}
-
 	executing_script = false;
 	return status;
 }
@@ -304,7 +337,7 @@ read_line(const char *prompt)
 	/*
 	 * Check for line continuation (trailing backslash).
 	 */
-	while (line[len - 1] == '\\') {
+	while (len > 0 && line[len - 1] == '\\') {
 		line[len - 1] = '\0';
 		len--;
 		if (fgets(buf, sizeof(buf), stdin) == NULL)
@@ -410,4 +443,5 @@ usage(void)
 
 	(void)fprintf(stderr, "usage: %s [-c command] [file]\n", shell_name);
 	done(1);
+	/* NOTREACHED */
 }

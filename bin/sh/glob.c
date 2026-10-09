@@ -32,6 +32,18 @@
 
 static int	 glob_match(const char *, const char *);
 static int	 glob_has_meta(const char *);
+static int	 glob_cmp(const void *, const void *);
+
+/*
+ * Comparison for qsort(): sort matches lexicographically, as POSIX
+ * requires for pathname expansion.
+ */
+static int
+glob_cmp(const void *a, const void *b)
+{
+
+	return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
 
 /*
  * Expand a glob pattern, returning an array of matching filenames.
@@ -89,6 +101,8 @@ glob_expand(const char *pattern, int *match_count)
 
 	if (count == 0)
 		return NULL;
+
+	(void)qsort(matches, (size_t)count, sizeof(char *), glob_cmp);
 
 	matches[count] = NULL;
 	*match_count = count;
@@ -155,19 +169,32 @@ glob_match(const char *pattern, const char *name)
 			break;
 		case '[':
 			{
-				int found = 0;
+				int found = 0, negate = 0;
+				const char *q = p + 1;
 
-				p++;
-				while (*p != '\0' && *p != ']') {
-					if (*p == *n) {
-						found = 1;
-						break;
-					}
-					p++;
+				if (*q == '!') {
+					negate = 1;
+					q++;
 				}
-				if (!found || *p == '\0')
+				while (*q != '\0' && *q != ']') {
+					if (q[1] == '-' && q[2] != '\0' &&
+					    q[2] != ']') {
+						if (*n >= q[0] && *n <= q[2])
+							found = 1;
+						q += 3;
+					} else {
+						if (*q == *n)
+							found = 1;
+						q++;
+					}
+				}
+				if (*q != ']')
 					return 0;
-				p++; /* Skip ']'. */
+				if (negate)
+					found = !found;
+				if (!found)
+					return 0;
+				p = q;	/* at ']'; loop advances past it */
 				break;
 			}
 		default:

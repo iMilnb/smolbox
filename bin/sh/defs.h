@@ -145,6 +145,8 @@ extern bool			interactive;
 extern bool			executing_script;
 extern bool			xtrace;
 extern const char		*shell_name;
+extern int			parse_error;	/* set by parser on syntax error */
+extern bool			noexec;		/* -n: parse but do not execute */
 
 /* ---- sh.h ---- */
 void	 done(int);
@@ -184,6 +186,8 @@ void	 var_cleanup(void);
 char	*expand(const char *);
 char	**expand_args(char **);
 void	 var_set_positional(int, char **);
+int	 var_positional_count(void);
+char	*var_positional(int);
 
 /* ---- glob.h ---- */
 char	**glob_expand(const char *, int *);

@@ -72,40 +72,44 @@ static const char usage_msg[] =
 int
 main(int argc, char *argv[])
 {
-	const char	*base;
+	const char		*base;
 	const struct app	*ap;
-	size_t		 i;
+	size_t			 i;
 
 	/*
-	 * Determine which tool to run based on argv[0].
-	 * If invoked as "smolbox", expect the command as argv[1].
-	 * If invoked via symlink (e.g. "init"), use the symlink name.
+	 * Determine which tool to run.
+	 *
+	 *   - Invoked via a symlink named after an applet (e.g. "init",
+	 *     or a login shell "-sh"): use that name directly.
+	 *   - Otherwise (invoked as "smolbox", or via an unrecognised
+	 *     symlink): multi-call mode, the command is argv[1].
 	 */
-	base = strrchr(argv[0], '/');
-	if (base != NULL)
-		base++;
-	else
-		base = argv[0];
-
-	if (strcmp(base, "smolbox") == 0) {
-		/* Invoked as "smolbox <cmd> [args...]". */
-		if (argc < 2) {
-			fputs(usage_msg, stderr);
-			return 1;
-		}
-		base = argv[1];
-		argc--;
-		argv++;
+	if (argc < 1 || argv[0] == NULL) {
+		fputs(usage_msg, stderr);
+		return 1;
 	}
 
-	/*
-	 * A login shell is exec'ed with argv[0] prefixed by '-'
-	 * (e.g. init execs /bin/sh as "-sh"); strip it before matching.
-	 */
-	while (*base == '-')
+	base = strrchr(argv[0], '/');
+	base = base != NULL ? base + 1 : argv[0];
+	while (*base == '-')		/* login-shell "-" prefix */
 		base++;
 
-	/* Look up the tool by name. */
+	for (i = 0; i < NAPP; i++) {
+		if (strcmp(apps[i].name, base) == 0) {
+			ap = &apps[i];
+			goto found;
+		}
+	}
+
+	/* Not an applet name: fall back to "smolbox <cmd> [args...]". */
+	if (argc < 2) {
+		fputs(usage_msg, stderr);
+		return 1;
+	}
+	base = argv[1];
+	argc--;
+	argv++;
+
 	for (i = 0; i < NAPP; i++) {
 		if (strcmp(apps[i].name, base) == 0) {
 			ap = &apps[i];

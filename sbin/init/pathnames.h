@@ -39,8 +39,8 @@
 #define	_PATH_BSHELL		"/bin/sh"
 #endif
 
-#ifndef _PATH_TTYS
-#define	_PATH_TTYS		"/etc/ttys"
+#ifndef _PATH_CONSTTY
+#define	_PATH_CONSTTY		"/dev/constty"
 #endif
 
 #ifndef _PATH_RUNCOM

@@ -192,6 +192,16 @@ copy_file(const char *source, const char *target)
 		return 1;
 	}
 
+	/* Refuse to copy a file onto itself (would truncate the source). */
+	{
+		struct stat tsb;
+		if (stat(target, &tsb) == 0 &&
+		    tsb.st_dev == sb.st_dev && tsb.st_ino == sb.st_ino) {
+			(void)close(fdin);
+			return 0;
+		}
+	}
+
 	/* Preserve timestamps. */
 	if (p_flag) {
 		times[0].tv_sec = sb.st_atime;

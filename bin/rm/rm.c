@@ -121,14 +121,25 @@ remove_one(const char *path)
 	}
 
 	if (S_ISDIR(sb.st_mode)) {
-		if (!r_flag && !d_flag) {
-			warnx("%s: is a directory", path);
-			return 1;
+		if (r_flag)
+			return remove_dir(path);
+		if (d_flag) {
+			/* -d removes empty directories only. */
+			if (i_flag && !prompt(path, "remove"))
+				return 0;
+			if (rmdir(path)) {
+				warn("%s", path);
+				return 1;
+			}
+			if (v_flag)
+				(void)printf("%s\n", path);
+			return 0;
 		}
-		return remove_dir(path);
+		warnx("%s: is a directory", path);
+		return 1;
 	}
 
-	if (!f_flag && !prompt(path, "remove"))
+	if (i_flag && !prompt(path, "remove"))
 		return 0;
 
 	if (unlink(path)) {
@@ -152,7 +163,7 @@ remove_dir(const char *path)
 	int		 ret;
 	char		 child[PATH_MAX];
 
-	if (!f_flag && !prompt(path, "remove"))
+	if (i_flag && !prompt(path, "remove"))
 		return 0;
 
 	dirp = opendir(path);
@@ -197,16 +208,16 @@ remove_dir(const char *path)
 static int
 prompt(const char *path, const char *action)
 {
-	int ch;
+	int ch, first;
 
 	(void)fprintf(stderr, "%s '%s'? ", action, path);
 	(void)fflush(stderr);
 
-	ch = getchar();
+	ch = first = getchar();
 	while (ch != '\n' && ch != EOF)
 		ch = getchar();
 
-	return (ch == 'y' || ch == 'Y');
+	return (first == 'y' || first == 'Y');
 }
 
 /*

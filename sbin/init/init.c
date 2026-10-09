@@ -57,10 +57,17 @@ typedef state_func_t (*state_t)(void);
 static void handle(sig_t, ...);
 static void delset(sigset_t *, ...);
 
-static void stall(const char *, ...) __attribute__((__format__(__printf__, 1, 2)));
-static void warning(const char *, ...) __attribute__((__format__(__printf__, 1, 2)));
-static void emergency(const char *, ...) __attribute__((__format__(__printf__, 1, 2)));
-__attribute__((__noreturn__)) static void disaster(int);
+static void vstall(const char *, va_list)
+    __attribute__((__format__(__printf__, 1, 0)));
+static void stall(const char *, ...)
+    __attribute__((__format__(__printf__, 1, 2)));
+static void warning(const char *, ...)
+    __attribute__((__format__(__printf__, 1, 2)));
+static void emergency(const char *, ...)
+    __attribute__((__format__(__printf__, 1, 2)));
+static void report_console_err(const char *, ...)
+    __attribute__((__format__(__printf__, 1, 2)));
+static void disaster(int) __attribute__((__noreturn__));
 static void badsys(int);
 
 static state_func_t single_user(void);
@@ -78,7 +85,11 @@ static int getsecuritylevel(void);
 static void setsecuritylevel(int);
 static int securelevel_present;
 
-static state_t requested_transition = single_user;
+/*
+ * Boot through runcom so /etc/rc is executed at startup, like the
+ * full NetBSD init; single_user is only the fallback state.
+ */
+static state_t requested_transition = runcom;
 
 /*
  * The mother of all processes.
@@ -184,6 +195,18 @@ delset(sigset_t *maskp, ...)
 }
 
 /*
+ * Log a formatted message (va_list form) and sleep for a while.
+ */
+static void
+vstall(const char *message, va_list ap)
+{
+
+	vsyslog(LOG_ALERT, message, ap);
+	closelog();
+	(void)sleep(STALL_TIMEOUT);
+}
+
+/*
  * Log a message and sleep for a while.
  */
 static void
@@ -192,10 +215,8 @@ stall(const char *message, ...)
 	va_list ap;
 
 	va_start(ap, message);
-	vsyslog(LOG_ALERT, message, ap);
+	vstall(message, ap);
 	va_end(ap);
-	closelog();
-	(void)sleep(STALL_TIMEOUT);
 }
 
 /*
@@ -348,19 +369,24 @@ transition(state_t s)
 static void
 report_console_err(const char *message, ...)
 {
-	va_list ap;
+	va_list ap, ap2;
 	FILE *f;
 	int fd;
 
 	va_start(ap, message);
-	if ((fd = open(_PATH_CONSOLE, O_WRONLY)) != -1 &&
-	    (f = fdopen(fd, "w")) != NULL) {
-		(void)fprintf(f, "init: ");
-		(void)vfprintf(f, message, ap);
-		(void)fputc('\n', f);
-		(void)fflush(f);
+	if ((fd = open(_PATH_CONSOLE, O_WRONLY)) != -1) {
+		if ((f = fdopen(fd, "w")) != NULL) {
+			va_copy(ap2, ap);
+			(void)fprintf(f, "init: ");
+			(void)vfprintf(f, message, ap2);
+			va_end(ap2);
+			(void)fputc('\n', f);
+			(void)fflush(f);
+			(void)fclose(f);
+		} else
+			(void)close(fd);
 	}
-	stall(message, ap);
+	vstall(message, ap);
 	va_end(ap);
 }
 
@@ -514,13 +540,13 @@ runcom(void)
 	pid_t pid, wpid;
 	int status;
 	const char *argv[4];
-	struct sigaction sa;
+	struct sigaction sa, satstp, sahup;
 
 	(void)sigemptyset(&sa.sa_mask);
 	sa.sa_flags = 0;
 	sa.sa_handler = SIG_IGN;
-	(void)sigaction(SIGTSTP, &sa, NULL);
-	(void)sigaction(SIGHUP, &sa, NULL);
+	(void)sigaction(SIGTSTP, &sa, &satstp);
+	(void)sigaction(SIGHUP, &sa, &sahup);
 
 	switch ((pid = fork())) {
 	case 0:
@@ -542,6 +568,8 @@ runcom(void)
 		    _PATH_RUNCOM);
 		while (waitpid(-1, NULL, WNOHANG) > 0)
 			continue;
+		(void)sigaction(SIGTSTP, &satstp, NULL);
+		(void)sigaction(SIGHUP, &sahup, NULL);
 		(void)sleep(STALL_TIMEOUT);
 		return (state_func_t)single_user;
 	default:
@@ -568,6 +596,9 @@ runcom(void)
 			wpid = -1;
 		}
 	} while (wpid != pid);
+
+	(void)sigaction(SIGTSTP, &satstp, NULL);
+	(void)sigaction(SIGHUP, &sahup, NULL);
 
 	if (!WIFEXITED(status)) {
 		warning("`%s' on `%s' terminated abnormally, going to "

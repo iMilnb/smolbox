@@ -25,10 +25,16 @@ LDADD+=	-lutil
 
 cleanobjdir=	no
 
-.PHONY:	clean
+.PHONY:	clean test test-vm
 
 clean:
 	find . -name '*.o' -type f -delete
 	rm -f smolbox
+
+test:
+	sh tests/run.sh
+
+test-vm:
+	sh tests/run-vm.sh
 
 .include <bsd.prog.mk>

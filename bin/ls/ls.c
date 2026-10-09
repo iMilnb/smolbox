@@ -60,7 +60,7 @@ static int	 cmp_time(const void *, const void *);
 static int	 cmp_size(const void *, const void *);
 static void	 print_long(const char *, const struct stat *);
 static const char	*mode_string(mode_t);
-static void	 list_dir(const char *, int);
+static int	 list_dir(const char *, int);
 static void	 usage(void) __attribute__((__noreturn__));
 
 /*
@@ -70,7 +70,7 @@ int
 main_ls(int argc, char *argv[])
 {
 	struct winsize	 win;
-	int		 ch;
+	int		 ch, rval;
 
 	/* Default format: columns on tty, single column otherwise. */
 	if (isatty(STDOUT_FILENO)) {
@@ -118,6 +118,7 @@ main_ls(int argc, char *argv[])
 
 	argc -= optind;
 	argv += optind;
+	rval = 0;
 
 	if (argc == 0) {
 		static char *dotav[] = { ".", NULL };
@@ -128,16 +129,16 @@ main_ls(int argc, char *argv[])
 	for (int i = 0; i < argc; i++) {
 		if (argc > 1 && !f_listdir)
 			(void)printf("%s:\n", argv[i]);
-		list_dir(argv[i], 0);
+		rval |= list_dir(argv[i], 0);
 	}
 
-	return 0;
+	return rval;
 }
 
 /*
  * List a single directory (or file with -d).
  */
-static void
+static int
 list_dir(const char *path, int depth)
 {
 	DIR		*dirp;
@@ -145,12 +146,14 @@ list_dir(const char *path, int depth)
 	struct entry	*entries = NULL;
 	size_t		 nentries = 0, alloc = 0;
 	struct stat	 sb;
-	int		 is_dir;
+	int		 is_dir, rval;
+
+	rval = 0;
 
 	if (lstat(path, &sb) == -1) {
 		(void)fprintf(stderr, "ls: %s: %s\n",
 		    path, strerror(errno));
-		return;
+		return (1);
 	}
 
 	is_dir = S_ISDIR(sb.st_mode);
@@ -161,7 +164,7 @@ list_dir(const char *path, int depth)
 			print_long(path, &sb);
 		else
 			(void)puts(path);
-		return;
+		return (0);
 	}
 
 	if (!is_dir) {
@@ -170,14 +173,14 @@ list_dir(const char *path, int depth)
 			print_long(path, &sb);
 		else
 			(void)puts(path);
-		return;
+		return (0);
 	}
 
 	dirp = opendir(path);
 	if (dirp == NULL) {
 		(void)fprintf(stderr, "ls: %s: %s\n",
 		    path, strerror(errno));
-		return;
+		return (1);
 	}
 
 	while ((dp = readdir(dirp)) != NULL) {
@@ -211,7 +214,7 @@ list_dir(const char *path, int depth)
 				(void)fprintf(stderr, "ls: %s\n",
 				    strerror(errno));
 				(void)closedir(dirp);
-				return;
+				return (1);
 			}
 		}
 
@@ -223,7 +226,7 @@ list_dir(const char *path, int depth)
 	(void)closedir(dirp);
 
 	if (nentries == 0)
-		return;
+		return (0);
 
 	/* Sort entries. */
 	if (f_sorttime)
@@ -268,8 +271,8 @@ list_dir(const char *path, int depth)
 		}
 	}
 
-	/* Ensure trailing newline for non-long formats. */
-	if (!f_longform)
+	/* Ensure trailing newline for non-long, non-oneline formats. */
+	if (!f_longform && !f_oneline)
 		(void)putchar('\n');
 
 	/* Recurse into subdirectories. */
@@ -293,6 +296,8 @@ list_dir(const char *path, int depth)
 	for (size_t i = 0; i < nentries; i++)
 		free(entries[i].name);
 	free(entries);
+
+	return (rval);
 }
 
 /*

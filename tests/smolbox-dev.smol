@@ -1,0 +1,13 @@
+# smolbox development image: compile the tree and run the test suite
+# inside a NetBSD microVM. The source is 9P-shared at /mnt by
+# tests/run-vm.sh; results are written back through the share.
+#
+# Built and driven by tests/run-vm.sh — not meant to be built by hand.
+
+FROM base,comp,etc
+
+LABEL smolbsd.service=smolbox-dev
+LABEL smolbsd.imgsize=1500
+LABEL smolbsd.addpkgs=""
+
+CMD sh /mnt/tests/run-vm-guest.sh

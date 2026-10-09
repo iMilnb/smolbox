@@ -44,6 +44,52 @@ static char		*parse_redir_arg(struct lexer *);
 static struct cmd	*make_cmd(enum node_type);
 static void		 add_arg(struct cmd *, char *);
 
+/* Set by the parser when a required keyword is missing. */
+int parse_error = 0;
+
+/*
+ * Reserved words that terminate a command list (appear only in keyword
+ * position, never as a command name in this shell).
+ */
+static int
+is_reserved(const char *w)
+{
+
+	return strcmp(w, "then") == 0 || strcmp(w, "else") == 0 ||
+	    strcmp(w, "elif") == 0 || strcmp(w, "fi") == 0 ||
+	    strcmp(w, "do") == 0 || strcmp(w, "done") == 0;
+}
+
+/*
+ * Consume command separators (';' and newlines).
+ */
+static void
+skip_seps(struct lexer *lx)
+{
+
+	while (lx->cur.type == TOK_SEMI || lx->cur.type == TOK_NEWLINE)
+		lexer_next(lx);
+}
+
+/*
+ * Skip separators, then consume the expected keyword if present.
+ * Returns 1 on match, 0 otherwise.
+ */
+static int
+match_kw(struct lexer *lx, const char *kw)
+{
+
+	skip_seps(lx);
+	if (lx->cur.type == TOK_WORD && lx->cur.word != NULL &&
+	    strcmp(lx->cur.word, kw) == 0) {
+		free(lx->cur.word);
+		lx->cur.word = NULL;
+		lexer_next(lx);
+		return 1;
+	}
+	return 0;
+}
+
 /*
  * Parse a complete command from the lexer.
  */
@@ -66,17 +112,22 @@ parse_list(struct lexer *lx, int terminator)
 {
 	struct cmd *left, *right;
 
+	/* Skip leading separators. */
+	skip_seps(lx);
+
 	left = parse_pipeline(lx);
 	if (left == NULL)
 		return NULL;
 
 	for (;;) {
 		switch (lx->cur.type) {
+		case TOK_NEWLINE:
 		case TOK_SEMI:
-			lx->cur.word = NULL;
-			lexer_next(lx);
+			skip_seps(lx);
 			if (lx->cur.type == terminator ||
-			    lx->cur.type == TOK_EOF)
+			    lx->cur.type == TOK_EOF ||
+			    (lx->cur.type == TOK_WORD && lx->cur.word != NULL &&
+			    is_reserved(lx->cur.word)))
 				return left;
 			right = parse_pipeline(lx);
 			if (right == NULL)
@@ -145,6 +196,8 @@ parse_command_word(struct lexer *lx)
 
 	switch (lx->cur.type) {
 	case TOK_WORD:
+		if (lx->cur.word != NULL && is_reserved(lx->cur.word))
+			return NULL;
 		cmd = parse_simple_or_control(lx);
 		break;
 	case TOK_LPAREN:
@@ -199,14 +252,15 @@ parse_simple_or_control(struct lexer *lx)
 	cmd->argv = calloc(2, sizeof(char *));
 	if (cmd->argv == NULL)
 		return NULL;
-	cmd->argv[0] = expand(lx->cur.word);
-	free(lx->cur.word);
+	/* Store the raw word; expansion happens at execution time. */
+	cmd->argv[0] = lx->cur.word;
+	lx->cur.word = NULL;
 	lexer_next(lx);
 
 	/* Read additional arguments. */
 	while (lx->cur.type == TOK_WORD) {
-		add_arg(cmd, expand(lx->cur.word));
-		free(lx->cur.word);
+		add_arg(cmd, lx->cur.word);
+		lx->cur.word = NULL;
 		lexer_next(lx);
 	}
 
@@ -223,34 +277,29 @@ parse_if(struct lexer *lx)
 
 	/* Consume "if". */
 	free(lx->cur.word);
+	lx->cur.word = NULL;
 	lexer_next(lx);
 
 	ifcmd = make_cmd(N_IF);
 	ifcmd->left = parse_list(lx, TOK_SEMI);
 
-	/* Expect "then". */
-	if (lx->cur.type == TOK_WORD &&
-	    strcmp(lx->cur.word, "then") == 0) {
-		free(lx->cur.word);
-		lexer_next(lx);
-	}
+	if (!match_kw(lx, "then"))
+		parse_error = 1;
 
 	ifcmd->right = parse_list(lx, TOK_SEMI);
 
 	/* Optional "else". */
-	if (lx->cur.type == TOK_WORD &&
+	skip_seps(lx);
+	if (lx->cur.type == TOK_WORD && lx->cur.word != NULL &&
 	    strcmp(lx->cur.word, "else") == 0) {
 		free(lx->cur.word);
+		lx->cur.word = NULL;
 		lexer_next(lx);
 		ifcmd->else_cmd = parse_list(lx, TOK_SEMI);
 	}
 
-	/* Expect "fi". */
-	if (lx->cur.type == TOK_WORD &&
-	    strcmp(lx->cur.word, "fi") == 0) {
-		free(lx->cur.word);
-		lexer_next(lx);
-	}
+	if (!match_kw(lx, "fi"))
+		parse_error = 1;
 
 	return ifcmd;
 }
@@ -265,26 +314,19 @@ parse_while(struct lexer *lx)
 
 	/* Consume "while". */
 	free(lx->cur.word);
+	lx->cur.word = NULL;
 	lexer_next(lx);
 
 	whilecmd = make_cmd(N_WHILE);
 	whilecmd->left = parse_list(lx, TOK_SEMI);
 
-	/* Expect "do". */
-	if (lx->cur.type == TOK_WORD &&
-	    strcmp(lx->cur.word, "do") == 0) {
-		free(lx->cur.word);
-		lexer_next(lx);
-	}
+	if (!match_kw(lx, "do"))
+		parse_error = 1;
 
 	whilecmd->right = parse_list(lx, TOK_SEMI);
 
-	/* Expect "done". */
-	if (lx->cur.type == TOK_WORD &&
-	    strcmp(lx->cur.word, "done") == 0) {
-		free(lx->cur.word);
-		lexer_next(lx);
-	}
+	if (!match_kw(lx, "done"))
+		parse_error = 1;
 
 	return whilecmd;
 }
@@ -299,26 +341,19 @@ parse_until(struct lexer *lx)
 
 	/* Consume "until". */
 	free(lx->cur.word);
+	lx->cur.word = NULL;
 	lexer_next(lx);
 
 	untilcmd = make_cmd(N_WHILE);
 	untilcmd->left = parse_list(lx, TOK_SEMI);
 
-	/* Expect "do". */
-	if (lx->cur.type == TOK_WORD &&
-	    strcmp(lx->cur.word, "do") == 0) {
-		free(lx->cur.word);
-		lexer_next(lx);
-	}
+	if (!match_kw(lx, "do"))
+		parse_error = 1;
 
 	untilcmd->right = parse_list(lx, TOK_SEMI);
 
-	/* Expect "done". */
-	if (lx->cur.type == TOK_WORD &&
-	    strcmp(lx->cur.word, "done") == 0) {
-		free(lx->cur.word);
-		lexer_next(lx);
-	}
+	if (!match_kw(lx, "done"))
+		parse_error = 1;
 
 	return untilcmd;
 }
@@ -330,9 +365,12 @@ static struct cmd *
 parse_for(struct lexer *lx)
 {
 	struct cmd *forcmd;
+	char **words = NULL;
+	int nw = 0, cap = 0;
 
 	/* Consume "for". */
 	free(lx->cur.word);
+	lx->cur.word = NULL;
 	lexer_next(lx);
 
 	forcmd = make_cmd(N_FOR);
@@ -340,48 +378,56 @@ parse_for(struct lexer *lx)
 	/* Read variable name. */
 	if (lx->cur.type == TOK_WORD) {
 		forcmd->var = lx->cur.word;
-		free(lx->cur.word);
+		lx->cur.word = NULL;
 		lexer_next(lx);
 	}
 
 	/* Optional "in words". */
-	if (lx->cur.type == TOK_WORD &&
+	skip_seps(lx);
+	if (lx->cur.type == TOK_WORD && lx->cur.word != NULL &&
 	    strcmp(lx->cur.word, "in") == 0) {
 		free(lx->cur.word);
+		lx->cur.word = NULL;
 		lexer_next(lx);
 
-		/* Read words. */
-		forcmd->words = calloc(2, sizeof(char *));
-		if (forcmd->words != NULL) {
-			int i = 0;
-			while (lx->cur.type == TOK_WORD) {
-				forcmd->words[i++] =
-				    expand(lx->cur.word);
+		cap = 8;
+		words = calloc((size_t)cap, sizeof(char *));
+		while (lx->cur.type == TOK_WORD) {
+			if (words == NULL) {
 				free(lx->cur.word);
+				lx->cur.word = NULL;
 				lexer_next(lx);
-				forcmd->words = realloc(forcmd->words,
-				    (size_t)(i + 2) * sizeof(char *));
-				if (forcmd->words == NULL)
-					break;
+				continue;
 			}
+			if (nw + 2 > cap) {
+				char **tmp;
+
+				cap *= 2;
+				tmp = realloc(words,
+				    (size_t)cap * sizeof(char *));
+				if (tmp == NULL) {
+					free(words);
+					words = NULL;
+					continue;
+				}
+				words = tmp;
+			}
+			/* Store raw word; expanded at execution time. */
+			words[nw++] = lx->cur.word;
+			lx->cur.word = NULL;
+			words[nw] = NULL;
+			lexer_next(lx);
 		}
+		forcmd->words = words;
 	}
 
-	/* Expect "do". */
-	if (lx->cur.type == TOK_WORD &&
-	    strcmp(lx->cur.word, "do") == 0) {
-		free(lx->cur.word);
-		lexer_next(lx);
-	}
+	if (!match_kw(lx, "do"))
+		parse_error = 1;
 
 	forcmd->right = parse_list(lx, TOK_SEMI);
 
-	/* Expect "done". */
-	if (lx->cur.type == TOK_WORD &&
-	    strcmp(lx->cur.word, "done") == 0) {
-		free(lx->cur.word);
-		lexer_next(lx);
-	}
+	if (!match_kw(lx, "done"))
+		parse_error = 1;
 
 	return forcmd;
 }
@@ -489,10 +535,12 @@ parse_redir_arg(struct lexer *lx)
 {
 
 	if (lx->cur.type == TOK_WORD) {
-		char *arg = expand(lx->cur.word);
-		free(lx->cur.word);
+		/* Store raw; apply_redirects() expands at execution time. */
+		char *arg = lx->cur.word;
+
+		lx->cur.word = NULL;
 		lexer_next(lx);
-		return arg;
+		return arg != NULL ? arg : strdup("");
 	}
 	return strdup("");
 }

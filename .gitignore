@@ -1,0 +1,7 @@
+smolbox
+*.o
+*.d
+.depend
+test-results.txt
+test-done
+.fast

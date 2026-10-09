@@ -205,6 +205,32 @@ read_word(struct lexer *lx)
 			break;
 		case '$':
 			lx->pos++;
+			/* Keep ${...} and $((...)) inside the word. */
+			if (lx->pos < lx->len &&
+			    lx->input[lx->pos] == '{') {
+				lx->pos++;
+				while (lx->pos < lx->len &&
+				    lx->input[lx->pos] != '}')
+					lx->pos++;
+				if (lx->pos < lx->len)
+					lx->pos++;
+			} else if (lx->pos < lx->len &&
+			    lx->input[lx->pos] == '(') {
+				int depth = 0;
+				while (lx->pos < lx->len) {
+					char c = lx->input[lx->pos];
+					if (c == '(')
+						depth++;
+					else if (c == ')') {
+						depth--;
+						if (depth == 0) {
+							lx->pos++;
+							break;
+						}
+					}
+					lx->pos++;
+				}
+			}
 			break;
 		case ' ':
 		case '\t':

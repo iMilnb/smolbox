@@ -26,8 +26,8 @@
 #ifndef _MOUNT_PATHNAMES_H_
 #define _MOUNT_PATHNAMES_H_
 
+#ifndef _PATH_FSTAB
 #define	_PATH_FSTAB		"/etc/fstab"
-#define	_PATH_MOUNTED		"/etc/mnttab"
-#define	_PATH_MOUNTDPID		"/var/run/mountd.pid"
+#endif
 
 #endif /* _MOUNT_PATHNAMES_H_ */

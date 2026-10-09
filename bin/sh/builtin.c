@@ -48,6 +48,7 @@ static int	 builtin_printenv(char *[]);
 static int	 builtin_true(char *[]);
 static int	 builtin_false(char *[]);
 static int	 builtin_test(char *[]);
+static int	 builtin_bracket(char *[]);
 static int	 builtin_type(char *[]);
 static int	 builtin_hash(char *[]);
 static int	 builtin_pwd(char *[]);
@@ -63,6 +64,7 @@ struct builtin {
 
 static const struct builtin builtins[] = {
 	{ ":",	builtin_true },
+	{ "[",	builtin_bracket },
 	{ "cd",	builtin_cd },
 	{ "echo",	builtin_echo },
 	{ "exit",	builtin_exit },
@@ -235,24 +237,26 @@ builtin_unset(char *argv[])
 static int
 builtin_set(char *argv[])
 {
-	int i;
+	int i, start, argc;
 
 	if (argv[1] == NULL) {
-		/* Print all variables. */
-		for (i = 0; i < 256; i++) {
-			char name[4];
-			char *val;
+		char **env = var_to_env();
 
-			(void)snprintf(name, sizeof(name), "%d", i);
-			val = var_get(name);
-			if (val != NULL)
-				(void)printf("$%s=%s\n", name, val);
-		}
+		for (i = 0; env != NULL && env[i] != NULL; i++)
+			(void)printf("%s\n", env[i]);
 		return 0;
 	}
 
-	/* Set positional parameters. */
-	var_set_positional(0, argv + 1);
+	start = 1;
+	if (strcmp(argv[1], "--") == 0)
+		start = 2;
+	else if (argv[1][0] == '-')
+		start = 2;	/* option flags: accepted, not acted on */
+
+	argc = 0;
+	for (i = start; argv[i] != NULL; i++)
+		argc++;
+	var_set_positional(argc, argv + start);
 	return 0;
 }
 
@@ -265,27 +269,20 @@ builtin_printenv(char *argv[])
 	int i;
 
 	if (argv[1] == NULL) {
-		/* Print all variables. */
-		for (i = 0; i < 256; i++) {
-			char name[4];
-			char *val;
+		char **env = var_to_env();
 
-			(void)snprintf(name, sizeof(name), "%d", i);
-			val = var_get(name);
-			if (val != NULL)
-				(void)printf("%s=%s\n", name, val);
-		}
+		for (i = 0; env != NULL && env[i] != NULL; i++)
+			(void)printf("%s\n", env[i]);
 		return 0;
 	}
 
 	for (i = 1; argv[i] != NULL; i++) {
-		char *val;
+		char *val = var_get(argv[i]);
 
-		val = var_get(argv[i]);
-		if (val != NULL)
-			(void)printf("%s\n", val);
-		else
+		if (val == NULL)
 			return 1;
+		(void)printf("%s\n", val);
+		free(val);
 	}
 	return 0;
 }
@@ -311,6 +308,41 @@ builtin_false(char *argv[])
 }
 
 /*
+ * Numeric comparison helper for test/[.
+ */
+static int
+test_numcmp(long a, const char *op, long b)
+{
+
+	if (strcmp(op, "-eq") == 0)
+		return a == b ? 0 : 1;
+	if (strcmp(op, "-ne") == 0)
+		return a != b ? 0 : 1;
+	if (strcmp(op, "-lt") == 0)
+		return a < b ? 0 : 1;
+	if (strcmp(op, "-le") == 0)
+		return a <= b ? 0 : 1;
+	if (strcmp(op, "-gt") == 0)
+		return a > b ? 0 : 1;
+	if (strcmp(op, "-ge") == 0)
+		return a >= b ? 0 : 1;
+	return 2;
+}
+
+/*
+ * True if s is a binary (three-operand) test operator.
+ */
+static int
+test_is_binop(const char *s)
+{
+
+	return strcmp(s, "=") == 0 || strcmp(s, "!=") == 0 ||
+	    strcmp(s, "-eq") == 0 || strcmp(s, "-ne") == 0 ||
+	    strcmp(s, "-lt") == 0 || strcmp(s, "-le") == 0 ||
+	    strcmp(s, "-gt") == 0 || strcmp(s, "-ge") == 0;
+}
+
+/*
  * test: evaluate an expression.
  */
 static int
@@ -319,15 +351,14 @@ builtin_test(char *argv[])
 	if (argv[1] == NULL)
 		return 1;
 
+	/* Unary primaries. */
 	if (strcmp(argv[1], "-z") == 0 && argv[2] != NULL)
 		return argv[2][0] == '\0' ? 0 : 1;
-
 	if (strcmp(argv[1], "-n") == 0 && argv[2] != NULL)
 		return argv[2][0] != '\0' ? 0 : 1;
-
-	if (strcmp(argv[1], "-f") == 0 && argv[2] != NULL)
+	if ((strcmp(argv[1], "-e") == 0 || strcmp(argv[1], "-f") == 0) &&
+	    argv[2] != NULL)
 		return access(argv[2], F_OK) == 0 ? 0 : 1;
-
 	if (strcmp(argv[1], "-d") == 0 && argv[2] != NULL) {
 		struct stat sb;
 
@@ -335,17 +366,38 @@ builtin_test(char *argv[])
 		    (sb.st_mode & S_IFDIR) ? 0 : 1;
 	}
 
-	if (strcmp(argv[1], "-e") == 0 && argv[2] != NULL)
-		return access(argv[2], F_OK) == 0 ? 0 : 1;
+	/* Binary primaries: operand op operand. */
+	if (argv[2] != NULL && argv[3] != NULL) {
+		if (strcmp(argv[2], "=") == 0)
+			return strcmp(argv[1], argv[3]) == 0 ? 0 : 1;
+		if (strcmp(argv[2], "!=") == 0)
+			return strcmp(argv[1], argv[3]) != 0 ? 0 : 1;
+		if (test_is_binop(argv[2]))
+			return test_numcmp(strtol(argv[1], NULL, 10),
+			    argv[2], strtol(argv[3], NULL, 10));
+	}
 
-	if (strcmp(argv[1], "=") == 0 && argv[3] == NULL)
-		return strcmp(argv[2], argv[3]) == 0 ? 0 : 1;
-
-	if (strcmp(argv[1], "!=") == 0 && argv[3] == NULL)
-		return strcmp(argv[2], argv[3]) != 0 ? 0 : 1;
+	/* A binary operator missing an operand is a syntax error. */
+	if (test_is_binop(argv[1]))
+		return 2;
 
 	/* Single argument: true if non-empty. */
 	return argv[1][0] != '\0' ? 0 : 1;
+}
+
+/*
+ * [: test with a required trailing "]".
+ */
+static int
+builtin_bracket(char *argv[])
+{
+	int n = 0;
+
+	while (argv[n] != NULL)
+		n++;
+	if (n >= 2 && strcmp(argv[n - 1], "]") == 0)
+		argv[n - 1] = NULL;
+	return builtin_test(argv);
 }
 
 /*

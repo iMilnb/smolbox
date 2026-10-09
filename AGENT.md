@@ -16,24 +16,26 @@ A BusyBox-style single-binary utility for the [smolBSD](https://github.com/NetBS
 struct app { const char *name; int (*entry)(int, char *[]); };
 ```
 
-1. Extract basename from `argv[0]` (after last `/`)
-2. If basename is `"smolbox"`, command is `argv[1]` (shift argc/argv)
-3. If basename matches a tool name (symlink), use it directly
-4. Strip leading `-` from basename (login-shell convention, e.g. init execs `-sh`)
-5. Call `main_<tool>(argc, argv)`
+1. Extract basename from `argv[0]` (after last `/`), strip any leading `-`
+   (login-shell convention, e.g. init execs `-sh`)
+2. If that name matches a tool (symlink invocation), call it directly
+3. Otherwise (invoked as `smolbox`, or via an unrecognised symlink) fall back
+   to multi-call mode: the command is `argv[1]` (shift argc/argv), then look it up
+4. Unknown name → `errx(1, "unknown command: %s", base)`
 
 Each tool's entry point is `main_<name>()`, NOT `main()`.
 
 ### File Layout
 
 ```
-smolbox.c              ← dispatcher (argv[0] → main_<tool>)
+smolbox.c              ← dispatcher (argv[0] → main_<tool>, argv[1] fallback)
 Makefile               ← single bsd.prog.mk, all SRCS listed
 bin/ls/ls.c            ← one tool per directory
 bin/sh/                ← multi-file tool (8 .c + 1 .h)
 sbin/init/             ← init.c + pathnames.h
 sbin/mount/            ← mount.c + pathnames.h
 sbin/sysctl/           ← sysctl.c (standalone)
+tests/                 ← run.sh (guest driver), run-vm.sh (host), t_<tool>.sh
 ```
 
 ## Build System
@@ -119,26 +121,29 @@ sbin/sysctl/           ← sysctl.c (standalone)
 - Skips `.` and `..` (POSIX requirement)
 - `-f` ignores nonexistent files and suppresses prompts
 
-### sh (`bin/sh/`, 3590 lines, 8 .c + 1 .h)
+### sh (`bin/sh/`, 3817 lines, 8 .c + 1 .h)
+
+A minimal POSIX-ish shell written for smolbox (not a port of 4.3BSD-Reno `sh`).
 
 - **Multi-file tool** — all sources listed individually in Makefile SRCS
-- `defs.h`: shared types (`struct cmd`, `struct lexer`, `struct redirect`), all function declarations, extern globals
-- `sh.c`: `main_sh()`, signal setup, `read_eval_loop()`, `read_line()`
-- `lexer.c`: tokenizer (words, quotes, escapes, operators)
-- `parser.c`: recursive descent, builds AST (`N_CMD`, `N_PIPE`, `N_LIST`, `N_AND`, `N_OR`, `N_IF`, `N_WHILE`, `N_FOR`)
-- `exec.c`: `execute()`, `fork_child()`, `wait_child()`, pipe/background/group execution
-- `builtin.c`: 16 builtins (`:`, `cd`, `echo`, `exit`, `export`, `false`, `hash`, `printenv`, `pwd`, `set`, `test`, `true`, `type`, `umask`, `unset`, `wait`)
-- `var.c`: hash table (64 buckets, djb2), `$var`, `${var}`, `$?`, `$$`, `$@`, `$#`, positional params
-- `glob.c`: `*`, `?`, `[abc]` filename expansion
-- `redirect.c`: redirect node creation/freeing (stub — actual logic in exec.c)
+- `defs.h`: shared types (`struct cmd`, `struct lexer`, `struct redirect`), all function declarations, extern globals (`parse_error`, `noexec`, `exit_status`)
+- `sh.c`: `main_sh()`, signal setup, `run_text()` (used by `-c` and scripts), `execute_script()`, `read_eval_loop()`, `read_line()`; `-c`/`-n`/`-x`/`-v` flags
+- `lexer.c`: tokenizer. Words keep quotes/`$`/escapes RAW (expansion is deferred). `${...}` and `$((...))` are captured inside the word (brace/paren are otherwise operators)
+- `parser.c`: recursive descent → AST (`N_CMD`, `N_PIPE`, `N_LIST`, `N_AND`, `N_OR`, `N_IF`, `N_WHILE`, `N_FOR`). Stores raw words; sets global `parse_error` on a missing `then`/`fi`/`do`/`done`. `parse_list` treats newline like `;` and stops at reserved words
+- `exec.c`: `execute()` walks the AST. `build_argv()` does the real work at EXEC time: expand words, apply leading `name=value` assignments, glob. Builtins run in-process (so `cd`/vars persist) with stdin/stdout saved+restored around redirections; externals fork+exec. `exec_pipe()` forks every stage and wires pipes. `exec_for()` iterates words/positionals
+- `builtin.c`: 17 builtins (`:`, `[`, `cd`, `echo`, `exit`, `export`, `false`, `hash`, `printenv`, `pwd`, `set`, `test`, `true`, `type`, `umask`, `unset`, `wait`). `[` is `test` with a trailing `]`. `test` supports string (`=`/`!=`) and numeric (`-eq`/`-ne`/`-lt`/`-le`/`-gt`/`-ge`) ops; a binary op missing an operand returns 2
+- `var.c`: hash table (64 buckets, djb2). `expand()` strips quotes (single=literal, double=allow `$` + limited escapes), expands `$var`/`${var}`/`$(( ))` (integer arithmetic)/`$?`/`$$`/`$@`/`$#`/`$!`/`$0-9`. `var_get()` always returns an owned copy
+- `glob.c`: `*`, `?`, `[abc]`/`[a-z]`/`[!x]` expansion, results sorted (POSIX order)
+- `redirect.c`: redirect node creation/freeing (apply logic lives in `exec.c:apply_redirects`)
 
 **Key gotchas**:
+- **Expansion is at EXEC time, not parse time.** The parser stores raw words; `build_argv()` expands them. This is what makes `x=5; echo $x`, `for i in ...; do echo $i`, and `i=$((i+1))` work.
+- **`fflush(stdout/stderr)` before every `_exit()` in a child and before restoring fds around a builtin.** stdio output is buffered; `_exit()` skips the flush, so without it pipes come out empty and a builtin's redirected output leaks to the terminal.
+- `exit_status` (the global `$?` reads) is set in `exec_simple`/`exec_pipe`; the AST's `&&`/`||` short-circuit returns rely on it.
+- Script args: `$0` is the script name; `var_set_positional(argc-1, argv+1)` so `$1` is the first real arg.
 - `ignoreeof = false` (exits on first EOF, avoids infinite prompt loop)
 - `.profile` only sourced when `isatty(STDIN_FILENO)` (avoids consuming pipe input)
-- `fflush(stdout)` / `fflush(stderr)` after each command in `read_eval_loop`
 - `SIGCHLD` is blocked (not used for reaping — `wait_child` uses `waitpid` directly)
-- `exec_builtin_or_cmd` stores pid from `fork_child()` before `switch` (was double-forking)
-- `defs.h` has NO include guard for system headers — all tool-internal
 - Non-static symbols in sh (`var_*`, `execute`, `lexer_*`, etc.) must not clash with other tools
 
 ### sysctl (`sbin/sysctl/sysctl.c`, 567 lines)
@@ -159,12 +164,34 @@ sbin/sysctl/           ← sysctl.c (standalone)
 ## Commands
 
 ```sh
-make                     # build all
+make                     # build all (NetBSD bmake; host GNU make cannot parse it)
 make clean               # remove .o and binary
 ./smolbox <tool> [args]  # run tool
 ln -s smolbox <tool>     # create symlink
 ./smolbox                # show usage
 ```
+
+## Testing
+
+The suite lives in `tests/` and runs **inside a smolBSD dev microVM** (the host is
+Linux; smolbox is NetBSD-only). Each tool has a `tests/t_<tool>.sh`; `tests/run.sh`
+is the in-guest driver, `tests/run-vm.sh` boots the VM from the host and streams
+`test-results.txt`.
+
+```sh
+sh tests/run-vm.sh            # build + run the whole suite in the VM
+sh tests/run-vm.sh --rebuild  # also rebuild the dev image
+touch .fast                   # build with -O0 for a quick edit/test loop
+rm .fast                      # back to the faithful -O2 -Werror build
+```
+
+- The guest copies the tree to its local root fs before building (the 9P share
+  reports no free space) and runs `make clean` first (copied `.o` files share an
+  mtime and would otherwise be treated as up to date).
+- **Always validate with the `-O2` build** (no `.fast`) before considering work done.
+- Quick host-side syntax check (no VM needed; glibc has `strlcpy`):
+  `gcc -fsyntax-only -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Ibin/sh -I. bin/sh/<file>.c`
+- `t_mount` skips its ffs round-trip when `newfs` is absent from the dev image.
 
 ## Adding Tools — Checklist
 

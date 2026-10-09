@@ -104,14 +104,14 @@ var_get(const char *name)
 		return strdup(buf);
 	}
 	if (name[0] == '!' && name[1] == '\0')
-		return strdup(0);
+		return strdup("");
 
 	/* Positional parameters. */
 	if (name[0] >= '1' && name[0] <= '9' && name[1] == '\0') {
 		int idx = name[0] - '1';
 
-		return positional[idx] != NULL ?
-		    positional[idx] : "";
+		return strdup(positional[idx] != NULL ?
+		    positional[idx] : "");
 	}
 	if (name[0] == '@' && name[1] == '\0') {
 		/* Return all positional parameters as one string. */
@@ -139,7 +139,7 @@ var_get(const char *name)
 	/* Look up in hash table. */
 	vp = var_find(name);
 	if (vp != NULL && vp->value != NULL)
-		return vp->value;
+		return strdup(vp->value);
 
 	return NULL;
 }
@@ -269,95 +269,267 @@ var_cleanup(void)
 }
 
 /*
- * Expand variable references in a string.
- * Handles: $var, ${var}, $?, $$, $!, $0-$9, $@, $#
+ * Number of positional parameters currently set.
+ */
+int
+var_positional_count(void)
+{
+
+	return positional_count;
+}
+
+/*
+ * Get positional parameter idx (1-based).  Returns NULL if unset.
+ */
+char *
+var_positional(int idx)
+{
+
+	if (idx < 1 || idx > positional_count)
+		return NULL;
+	return strdup(positional[idx - 1] != NULL ?
+	    positional[idx - 1] : "");
+}
+
+/*
+ * Arithmetic expansion: evaluate a $(( )) integer expression.
+ * Supports + - * / % parentheses, unary +/-, variables and integers.
+ */
+static long	 arith_expr(const char **);
+
+static void
+arith_skip(const char **s)
+{
+
+	while (**s == ' ' || **s == '\t')
+		(*s)++;
+}
+
+static long
+arith_factor(const char **s)
+{
+	long v;
+	char name[64];
+	int i = 0;
+
+	arith_skip(s);
+	if (**s == '(') {
+		(*s)++;
+		v = arith_expr(s);
+		arith_skip(s);
+		if (**s == ')')
+			(*s)++;
+		return v;
+	}
+	if (**s == '-') {
+		(*s)++;
+		return -arith_factor(s);
+	}
+	if (**s == '+') {
+		(*s)++;
+		return arith_factor(s);
+	}
+	if (isdigit((unsigned char)**s)) {
+		char *end;
+
+		v = strtol(*s, &end, 10);
+		*s = end;
+		return v;
+	}
+	while (isalnum((unsigned char)**s) || **s == '_') {
+		if (i < 63)
+			name[i++] = **s;
+		(*s)++;
+	}
+	name[i] = '\0';
+	if (i == 0)
+		return 0;
+	{
+		char *val = var_get(name);
+
+		v = val != NULL ? strtol(val, NULL, 10) : 0;
+		free(val);
+	}
+	return v;
+}
+
+static long
+arith_term(const char **s)
+{
+	long v = arith_factor(s);
+
+	for (;;) {
+		long d;
+
+		arith_skip(s);
+		if (**s == '*') {
+			(*s)++;
+			v *= arith_factor(s);
+		} else if (**s == '/') {
+			(*s)++;
+			d = arith_factor(s);
+			v = d != 0 ? v / d : 0;
+		} else if (**s == '%') {
+			(*s)++;
+			d = arith_factor(s);
+			v = d != 0 ? v % d : 0;
+		} else
+			break;
+	}
+	return v;
+}
+
+static long
+arith_expr(const char **s)
+{
+	long v = arith_term(s);
+
+	for (;;) {
+		arith_skip(s);
+		if (**s == '+') {
+			(*s)++;
+			v += arith_term(s);
+		} else if (**s == '-') {
+			(*s)++;
+			v -= arith_term(s);
+		} else
+			break;
+	}
+	return v;
+}
+
+/*
+ * Expand a variable reference at *sp (which points at '$'), appending the
+ * result at *dp and advancing both pointers.  Handles $var, ${var}, and
+ * the special parameters $0-$9, $?, $$, $!, $@, $#.
+ */
+static void
+expand_dollar(const char **sp, char **dp, char *end)
+{
+	const char *src = *sp;
+	char *dst = *dp;
+	char name[256];
+	int i = 0;
+	char *val;
+
+	src++;				/* skip '$' */
+	if (src[0] == '(' && src[1] == '(') {
+		/* Arithmetic expansion: $(( expr )). */
+		char buf[32];
+		long v;
+
+		src += 2;
+		v = arith_expr(&src);
+		while (*src == ' ' || *src == '\t')
+			src++;
+		if (src[0] == ')' && src[1] == ')')
+			src += 2;
+		(void)snprintf(buf, sizeof(buf), "%ld", v);
+		(void)strlcpy(dst, buf, (size_t)(end - dst));
+		dst += strlen(dst);
+		*sp = src; *dp = dst;
+		return;
+	}
+	if (*src == '{') {
+		src++;
+		while (*src != '\0' && *src != '}' && i < 255)
+			name[i++] = *src++;
+		name[i] = '\0';
+		if (*src == '}')
+			src++;
+	} else if (*src == '?' || *src == '!' || *src == '$' ||
+	    *src == '@' || *src == '#' || (*src >= '0' && *src <= '9')) {
+		name[0] = *src++;
+		name[1] = '\0';
+	} else if (*src == '\0') {
+		*dst++ = '$';
+		*sp = src; *dp = dst;
+		return;
+	} else {
+		while (*src != '\0' && i < 255 &&
+		    (isalnum((unsigned char)*src) || *src == '_'))
+			name[i++] = *src++;
+		name[i] = '\0';
+		if (i == 0) {
+			*dst++ = '$';
+			*sp = src; *dp = dst;
+			return;
+		}
+	}
+
+	val = var_get(name);
+	if (val != NULL) {
+		(void)strlcpy(dst, val, (size_t)(end - dst));
+		dst += strlen(dst);
+		free(val);
+	}
+	*sp = src; *dp = dst;
+}
+
+/*
+ * Expand a word: strip quotes, honour escapes, and expand variables.
+ * Single quotes are literal; double quotes allow $ and backslash escapes.
  */
 char *
 expand(const char *input)
 {
-	char	*result;
+	char		*result;
 	const char	*src;
-	char	*dst;
-	size_t		len;
+	char		*dst, *end;
+	size_t		 len;
 
 	if (input == NULL)
 		return strdup("");
 
 	len = strlen(input);
-	result = malloc(len * 4 + 1); /* Worst case expansion. */
+	result = malloc(len * 4 + 1);	/* worst-case expansion */
 	if (result == NULL)
 		return NULL;
-
-	src = input;
+	end = result + len * 4 + 1;
 	dst = result;
+	src = input;
 
 	while (*src != '\0') {
-		if (*src == '\\' && src[1] != '\0') {
+		switch (*src) {
+		case '\'':
+			/* Single quotes: literal, no expansion. */
 			src++;
-			*dst++ = *src++;
-			continue;
-		}
-		if (*src != '$') {
-			*dst++ = *src++;
-			continue;
-		}
-
-		src++;
-		if (*src == '{') {
-			/* ${var} form. */
-			char name[256];
-			int i = 0;
-
-			src++;
-			while (*src != '\0' && *src != '}' && i < 255)
-				name[i++] = *src++;
-			name[i] = '\0';
-			if (*src == '}')
+			while (*src != '\0' && *src != '\'')
+				*dst++ = *src++;
+			if (*src == '\'')
 				src++;
-
-			char *val = var_get(name);
-			if (val != NULL) {
-				(void)strlcpy(dst, val, (size_t)(result + len * 4 + 1 - dst));
-				dst += strlen(dst);
-				free(val);
+			break;
+		case '"':
+			/* Double quotes: strip, allow $ and limited escapes. */
+			src++;
+			while (*src != '\0' && *src != '"') {
+				if (*src == '\\' && (src[1] == '$' ||
+				    src[1] == '`' || src[1] == '"' ||
+				    src[1] == '\\' || src[1] == '\n')) {
+					src++;
+					*dst++ = *src++;
+				} else if (*src == '$') {
+					expand_dollar(&src, &dst, end);
+				} else {
+					*dst++ = *src++;
+				}
 			}
-			continue;
-		}
-
-		/* $var form (no braces). */
-		if (*src == '\0') {
-			*dst++ = '$';
-			continue;
-		}
-
-		/* Read full variable name (alphanumeric + underscore). */
-		{
-			char	name[256];
-			int		i = 0;
-
-			while (*src != '\0' && i < 255 &&
-			    (isalnum((unsigned char)*src) || *src == '_'))
-				name[i++] = *src++;
-			name[i] = '\0';
-
-			if (i == 0) {
-				*dst++ = '$';
-				continue;
-			}
-
-			char *val = var_get(name);
-			if (val != NULL) {
-				(void)strlcpy(dst, val,
-				    (size_t)(result + len * 4 + 1 - dst));
-				dst += strlen(dst);
-				free(val);
-			} else {
-				*dst++ = '$';
-				(void)strlcpy(dst, name,
-				    (size_t)(result + len * 4 + 1 - dst));
-				dst += strlen(dst);
-			}
-			continue;
+			if (*src == '"')
+				src++;
+			break;
+		case '\\':
+			if (src[1] != '\0') {
+				src++;
+				*dst++ = *src++;
+			} else
+				src++;
+			break;
+		case '$':
+			expand_dollar(&src, &dst, end);
+			break;
+		default:
+			*dst++ = *src++;
+			break;
 		}
 	}
 

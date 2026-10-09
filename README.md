@@ -4,10 +4,12 @@ A BusyBox-style single-binary utility collection for **smolBSD** (<https://githu
 
 ## Overview
 
-smolbox ships as one static executable. Each tool is selected by `argv[0]`:
+smolbox ships as one static executable. A tool is selected by `argv[0]`
+basename, or — when invoked as `smolbox` (or via an unrecognised name) — by
+`argv[1]`:
 
 ```
-./smolbox ls -l          # direct invocation
+./smolbox ls -l          # multi-call: command is argv[1]
 ln -s smolbox ls && ./ls # symlink (BusyBox-style)
 ```
 
@@ -21,7 +23,7 @@ ln -s smolbox ls && ./ls # symlink (BusyBox-style)
 | `ls`      | `bin/ls/`    | NetBSD `bin/ls`                |
 | `mount`   | `sbin/mount/`| NetBSD `sbin/mount` / `mount_ffs` |
 | `rm`      | `bin/rm/`    | NetBSD `bin/rm`                |
-| `sh`      | `bin/sh/`    | 4.3BSD Reno `sh`               |
+| `sh`      | `bin/sh/`    | minimal POSIX-ish shell (original) |
 | `sysctl`  | `sbin/sysctl/`| NetBSD `sbin/sysctl`          |
 
 ## Build
@@ -33,10 +35,23 @@ make          # build
 make clean    # remove all .o and binary
 ```
 
+## Test
+
+The suite runs inside a smolBSD dev microVM (smolbox is NetBSD-only, so it
+cannot be built or tested on a Linux host):
+
+```sh
+sh tests/run-vm.sh            # build + run the whole suite in the VM
+```
+
+`tests/` holds one `t_<tool>.sh` per tool plus the VM harness. See `AGENT.md`
+for details.
+
 ## Design
 
 - **Single binary**: all tools compiled into one `smolbox` executable
-- **Dispatch**: `smolbox.c` resolves `argv[0]` basename and calls `main_<tool>()`
+- **Dispatch**: `smolbox.c` resolves the `argv[0]` basename (or `argv[1]` in
+  multi-call mode) and calls `main_<tool>()`
 - **NetBSD-only**: no `#ifdef __linux__` or cross-platform guards
 - **KNF style**: follows NetBSD Kernel Naming conventions
 - **BSD 2-clause** license throughout

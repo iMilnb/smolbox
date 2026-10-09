@@ -26,6 +26,7 @@
 #include <sys/param.h>
 #include <sys/wait.h>
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -38,8 +39,7 @@
 
 static int	 exec_simple(struct cmd *);
 static int	 exec_pipe(struct cmd *);
-static int	 exec_builtin_or_cmd(struct cmd *);
-static int	 do_exec(struct cmd *);
+static int	 do_exec_argv(char **);
 static int	 exec_subshell(struct cmd *);
 static int	 exec_background(struct cmd *);
 static pid_t	 fork_child(void);
@@ -47,6 +47,9 @@ static int	 wait_child(pid_t);
 static char	*find_command(const char *);
 static void	 apply_redirects(struct redirect *);
 static void	 here_doc_expand(struct redirect *);
+static char	**build_argv(struct cmd *);
+static void	 free_argv(char **);
+static int	 collect_stages(struct cmd *, struct cmd **, int);
 
 /*
  * Execute a command tree.
@@ -116,100 +119,254 @@ execute(struct cmd *tree)
 }
 
 /*
+ * Expand a command's words: strip quotes, expand variables, apply leading
+ * assignments to the current shell, and glob.  Returns a newly allocated
+ * NULL-terminated argv, or NULL if nothing remains to execute (e.g. the
+ * command consisted only of assignments).
+ */
+static char **
+build_argv(struct cmd *cmd)
+{
+	char **out;
+	int i, n = 0, cap = 0;
+
+	for (i = 0; cmd->argv[i] != NULL; i++)
+		cap++;
+	out = calloc((size_t)(cap + 1), sizeof(char *));
+	if (out == NULL)
+		return NULL;
+
+	for (i = 0; cmd->argv[i] != NULL; i++) {
+		char *word = expand(cmd->argv[i]);
+		char *eq;
+
+		if (word == NULL)
+			continue;
+
+		/* Assignment: name=value, only before the command word. */
+		eq = strchr(word, '=');
+		if (n == 0 && eq != NULL && eq != word &&
+		    (isalpha((unsigned char)word[0]) || word[0] == '_')) {
+			int ok = 1, k;
+
+			for (k = 0; k < (int)(eq - word); k++)
+				if (!isalnum((unsigned char)word[k]) &&
+				    word[k] != '_')
+					ok = 0;
+			if (ok) {
+				*eq = '\0';
+				var_set(word, eq + 1);
+				free(word);
+				continue;
+			}
+		}
+
+		/* Pathname expansion. */
+		{
+			int gc = 0;
+			char **g = glob_expand(word, &gc);
+
+			if (g != NULL) {
+				int j;
+
+				for (j = 0; g[j] != NULL; j++)
+					out[n++] = g[j];
+				free(g);	/* free array only */
+				free(word);
+				continue;
+			}
+		}
+		out[n++] = word;
+	}
+	out[n] = NULL;
+
+	if (n == 0) {
+		free(out);
+		return NULL;
+	}
+	return out;
+}
+
+/*
+ * Free an argv array built by build_argv().
+ */
+static void
+free_argv(char **argv)
+{
+	int i;
+
+	if (argv == NULL)
+		return;
+	for (i = 0; argv[i] != NULL; i++)
+		free(argv[i]);
+	free(argv);
+}
+
+/*
  * Execute a simple command (with possible redirections).
  */
 static int
 exec_simple(struct cmd *cmd)
 {
+	char **argv;
 	int status;
 
 	if (cmd->argv == NULL || cmd->argv[0] == NULL)
 		return 0;
 
-	if (xtrace)
-		(void)fprintf(stderr, "+ %s\n", cmd->argv[0]);
+	argv = build_argv(cmd);
+	if (argv == NULL) {
+		exit_status = 0;
+		return 0;		/* assignments only, or empty */
+	}
 
-	status = exec_builtin_or_cmd(cmd);
+	if (xtrace)
+		(void)fprintf(stderr, "+ %s\n", argv[0]);
+
+	/*
+	 * Builtins run in the current shell so that cd, variable and
+	 * redirection side effects persist; the standard fds are saved and
+	 * restored so a redirection on a builtin does not leak out.
+	 */
+	if (is_builtin(argv[0])) {
+		int si = dup(STDIN_FILENO);
+		int so = dup(STDOUT_FILENO);
+
+		apply_redirects(cmd->redirects);
+		status = run_builtin(argv);
+		/* Flush before restoring the fds so buffered output from the
+		 * builtin lands on the redirected fd, not the terminal. */
+		(void)fflush(stdout);
+		(void)fflush(stderr);
+		if (si >= 0) {
+			(void)dup2(si, STDIN_FILENO);
+			(void)close(si);
+		}
+		if (so >= 0) {
+			(void)dup2(so, STDOUT_FILENO);
+			(void)close(so);
+		}
+		free_argv(argv);
+		exit_status = status;
+		return status;
+	}
+
+	/* External command: fork, redirect in the child, exec. */
+	{
+		pid_t pid = fork_child();
+
+		if (pid == -1) {
+			(void)fprintf(stderr, "sh: fork: %s\n",
+			    strerror(errno));
+			free_argv(argv);
+			exit_status = 1;
+			return 1;
+		}
+		if (pid == 0) {
+			apply_redirects(cmd->redirects);
+			status = do_exec_argv(argv);
+			_exit(status);
+		}
+		status = wait_child(pid);
+	}
+	free_argv(argv);
+	exit_status = status;
 	return status;
 }
 
 /*
- * Execute a pipeline.
+ * Collect the stages of a left-nested pipeline into out[], in order.
+ */
+static int
+collect_stages(struct cmd *node, struct cmd **out, int n)
+{
+
+	if (node == NULL)
+		return n;
+	if (node->type == N_PIPE) {
+		n = collect_stages(node->left, out, n);
+		return collect_stages(node->right, out, n);
+	}
+	if (n < 64)
+		out[n++] = node;
+	return n;
+}
+
+/*
+ * Execute a pipeline: fork every stage, wire them together with pipes,
+ * and return the exit status of the last stage.
  */
 static int
 exec_pipe(struct cmd *cmd)
 {
-	struct cmd	*node;
-	int			pipefd[2];
-	pid_t		pid;
-	int			status;
+	struct cmd *stages[64];
+	pid_t pids[64];
+	int n, i, status = 0;
+	int prev_fd = -1;
 
-	node = cmd->left;
+	n = collect_stages(cmd, stages, 0);
+	if (n == 0)
+		return 0;
 
-	/* First command in pipeline. */
-	status = exec_builtin_or_cmd(node);
-	node = node->right;
+	for (i = 0; i < n; i++) {
+		int pfd[2];
+		int use_pipe = (i < n - 1);
 
-	while (node != NULL) {
-		if (pipe(pipefd) == -1) {
+		if (use_pipe && pipe(pfd) == -1) {
 			(void)fprintf(stderr, "sh: pipe: %s\n",
 			    strerror(errno));
 			return 1;
 		}
 
-		pid = fork_child();
-		if (pid == 0) {
-			/* Child: connect stdin to pipe. */
-			(void)close(pipefd[1]);
-			(void)dup2(pipefd[0], STDIN_FILENO);
-			(void)close(pipefd[0]);
-			status = exec_builtin_or_cmd(node);
-			_exit(status);
+		pids[i] = fork_child();
+		if (pids[i] == -1) {
+			(void)fprintf(stderr, "sh: fork: %s\n",
+			    strerror(errno));
+			return 1;
+		}
+		if (pids[i] == 0) {
+			char **av;
+			int st;
+
+			if (prev_fd != -1) {
+				(void)dup2(prev_fd, STDIN_FILENO);
+				(void)close(prev_fd);
+			}
+			if (use_pipe) {
+				(void)dup2(pfd[1], STDOUT_FILENO);
+				(void)close(pfd[0]);
+				(void)close(pfd[1]);
+			}
+			apply_redirects(stages[i]->redirects);
+			av = build_argv(stages[i]);
+			if (av == NULL)
+				_exit(0);
+			if (is_builtin(av[0])) {
+				st = run_builtin(av);
+				(void)fflush(stdout);
+				(void)fflush(stderr);
+				_exit(st);
+			}
+			_exit(do_exec_argv(av));
 		}
 
-		/* Parent: wait for child. */
-		status = wait_child(pid);
-		node = node->right;
+		/* Parent. */
+		if (prev_fd != -1)
+			(void)close(prev_fd);
+		if (use_pipe) {
+			(void)close(pfd[1]);
+			prev_fd = pfd[0];
+		} else {
+			prev_fd = -1;
+		}
 	}
+	if (prev_fd != -1)
+		(void)close(prev_fd);
 
-	return status;
-}
+	for (i = 0; i < n; i++)
+		status = wait_child(pids[i]);
 
-/*
- * Execute a command: builtin or external.
- */
-static int
-exec_builtin_or_cmd(struct cmd *cmd)
-{
-	int status;
-
-	if (cmd->argv == NULL || cmd->argv[0] == NULL)
-		return 0;
-
-	/* Apply I/O redirections. */
-	apply_redirects(cmd->redirects);
-
-	/* Check for builtin. */
-	if (is_builtin(cmd->argv[0]))
-		return run_builtin(cmd->argv);
-
-	/* External command: fork and exec. */
-	pid_t pid = fork_child();
-	switch (pid) {
-	case -1:
-		(void)fprintf(stderr, "sh: fork: %s\n",
-		    strerror(errno));
-		return 1;
-	case 0:
-		/* Child process. */
-		status = do_exec(cmd);
-		_exit(status);
-	default:
-		/* Parent: wait for child. */
-		status = wait_child(pid);
-		break;
-	}
-
+	exit_status = status;
 	return status;
 }
 
@@ -217,32 +374,31 @@ exec_builtin_or_cmd(struct cmd *cmd)
  * Actually exec an external command.
  */
 static int
-do_exec(struct cmd *cmd)
+do_exec_argv(char **argv)
 {
 	char	*path;
 	char	**env;
 
-	if (cmd->argv == NULL || cmd->argv[0] == NULL)
+	if (argv == NULL || argv[0] == NULL)
 		return 127;
 
-	path = find_command(cmd->argv[0]);
+	path = find_command(argv[0]);
 	if (path == NULL) {
-		(void)fprintf(stderr, "sh: %s: not found\n",
-		    cmd->argv[0]);
+		(void)fprintf(stderr, "sh: %s: not found\n", argv[0]);
 		return 127;
 	}
 
 	env = var_to_env();
-	(void)execve(path, cmd->argv, env);
+	(void)execve(path, argv, env);
 
-	/* If exec fails, check if it's a directory or permission issue. */
+	/* exec failed: distinguish permission from not-found. */
 	if (errno == EACCES) {
-		(void)fprintf(stderr, "sh: %s: permission denied\n",
-		    cmd->argv[0]);
+		(void)fprintf(stderr, "sh: %s: permission denied\n", argv[0]);
+		free(path);
 		return 126;
 	}
-	(void)fprintf(stderr, "sh: %s: %s\n",
-	    cmd->argv[0], strerror(errno));
+	(void)fprintf(stderr, "sh: %s: %s\n", argv[0], strerror(errno));
+	free(path);
 	return 127;
 }
 
@@ -252,28 +408,30 @@ do_exec(struct cmd *cmd)
 int
 exec_for(struct cmd *cmd)
 {
-	int		i, status;
+	int		i, nwords = 0, status;
 	char		*words[256];
-	char		idx[4];
+
+	if (cmd->var == NULL)
+		return 0;
 
 	if (cmd->words == NULL) {
-		/* Use positional parameters. */
-		words[0] = var_get("1");
-		i = 1;
-		while (words[i - 1] != NULL && i < 255) {
-			(void)snprintf(idx, sizeof(idx), "%d", ++i);
-			words[i - 1] = var_get(idx);
-		}
+		/* Iterate the positional parameters. */
+		int count = var_positional_count();
+
+		for (i = 1; i <= count && nwords < 255; i++)
+			words[nwords++] = var_positional(i);
 	} else {
-		/* Use explicit word list. */
-		for (i = 0; cmd->words[i] != NULL && i < 255; i++)
-			words[i] = cmd->words[i];
+		/* Expand the explicit word list at execution time. */
+		for (i = 0; cmd->words[i] != NULL && nwords < 255; i++)
+			words[nwords++] = expand(cmd->words[i]);
 	}
+	words[nwords] = NULL;
 
 	status = 0;
-	for (i = 0; words[i] != NULL; i++) {
+	for (i = 0; i < nwords; i++) {
 		var_set(cmd->var, words[i]);
 		status = execute(cmd->right);
+		free(words[i]);
 		if (status != 0)
 			break;
 	}
@@ -293,6 +451,8 @@ exec_subshell(struct cmd *cmd)
 	pid = fork_child();
 	if (pid == 0) {
 		status = execute(cmd->left);
+		(void)fflush(stdout);
+		(void)fflush(stderr);
 		_exit(status);
 	}
 	status = wait_child(pid);
@@ -312,6 +472,8 @@ exec_background(struct cmd *cmd)
 		int status;
 
 		status = execute(cmd->left);
+		(void)fflush(stdout);
+		(void)fflush(stderr);
 		_exit(status);
 	}
 	/* Parent does not wait. */
@@ -372,29 +534,31 @@ wait_child(pid_t pid)
 static char *
 find_command(const char *name)
 {
-	char	*path, *dir, *savedir = NULL;
+	char	*path, *dir, *savedir;
 	char	fullpath[PATH_MAX];
-	size_t	namelen;
 
 	/* If name contains '/', use it directly. */
 	if (strchr(name, '/') != NULL)
 		return strdup(name);
 
+	/* var_get returns an owned copy; the fallback must be writable
+	 * too, since strtok_r() modifies it in place. */
 	path = var_get("PATH");
 	if (path == NULL)
-		path = "/bin:/usr/bin";
+		path = strdup("/bin:/usr/bin");
 
-	namelen = strlen(name);
 	dir = strtok_r(path, ":", &savedir);
-
 	while (dir != NULL) {
 		(void)snprintf(fullpath, sizeof(fullpath),
 		    "%s/%s", dir, name);
-		if (access(fullpath, X_OK) == 0)
+		if (access(fullpath, X_OK) == 0) {
+			free(path);
 			return strdup(fullpath);
+		}
 		dir = strtok_r(NULL, ":", &savedir);
 	}
 
+	free(path);
 	return NULL;
 }
 
@@ -463,8 +627,8 @@ static void
 here_doc_expand(struct redirect *redir)
 {
 	int		pfd[2];
-	pid_t		pid;
 
+	(void)redir;
 	if (pipe(pfd) == -1)
 		return;
 

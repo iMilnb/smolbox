@@ -42,6 +42,8 @@ extern int sysctlgetmibinfo(const char *, int *, u_int *,
 static int	aflag, nflag, rflag, wflag, xflag;
 static int	errs;
 
+#define MAXSYSCTLSZ 65536
+
 /*
  * Top-level sysctl categories.
  */
@@ -51,6 +53,8 @@ static const char * const top_categories[] = {
 };
 
 static void	 usage(void) __attribute__((__noreturn__));
+static int	 resolve_node(const char *, int *, size_t *,
+		    struct sysctlnode **);
 static void	 walk_tree(const char *);
 static void	 get_value(const char *);
 static void	 set_value(const char *, const char *);
@@ -138,6 +142,29 @@ main_sysctl(int argc, char *argv[])
 }
 
 /*
+ * Resolve a sysctl name to its MIB and node via sysctlgetmibinfo(3).
+ * Any of miblenp / nodep may be NULL.  Returns 0 on success, -1 on error.
+ */
+static int
+resolve_node(const char *name, int *mib, size_t *miblenp,
+    struct sysctlnode **nodep)
+{
+	struct sysctlnode *node = NULL;
+	char sname[256];
+	size_t sz = sizeof(sname);
+	u_int miblen = CTL_MAXNAME;
+
+	if (sysctlgetmibinfo(name, mib, &miblen, sname, &sz, &node,
+	    SYSCTL_VERSION) != 0 || node == NULL)
+		return -1;
+	if (miblenp != NULL)
+		*miblenp = miblen;
+	if (nodep != NULL)
+		*nodep = node;
+	return 0;
+}
+
+/*
  * Walk a sysctl subtree recursively.
  * Children are queried by numeric index (prefix.0, prefix.1, ...).
  */
@@ -148,13 +175,13 @@ walk_tree(const char *prefix)
 	size_t sz;
 	char sname[256];
 	int name[CTL_MAXNAME];
-	size_t miblen;
+	u_int miblen;
 	u_int i;
 
 	sz = sizeof(sname);
 	miblen = CTL_MAXNAME;
 	node = NULL;
-	if (sysctlgetmibinfo(prefix, name, (u_int *)&miblen, sname, &sz, &node,
+	if (sysctlgetmibinfo(prefix, name, &miblen, sname, &sz, &node,
 	    SYSCTL_VERSION) != 0 || node == NULL)
 		return;
 
@@ -170,13 +197,13 @@ walk_tree(const char *prefix)
 		struct sysctlnode *cnode;
 		size_t csz;
 		char csname[256];
-		size_t cmiblen;
+		u_int cmiblen;
 
 		(void)snprintf(child, sizeof(child), "%s.%u", prefix, i);
 		csz = sizeof(csname);
 		cmiblen = CTL_MAXNAME;
 		cnode = NULL;
-		if (sysctlgetmibinfo(child, name, (u_int *)&cmiblen, csname, &csz,
+		if (sysctlgetmibinfo(child, name, &cmiblen, csname, &csz,
 		    &cnode, SYSCTL_VERSION) == 0 && cnode != NULL)
 			walk_tree(csname);
 	}
@@ -209,30 +236,52 @@ get_value(const char *name)
 	{
 		void *buf;
 		u_int type;
-		struct sysctlnode node;
-		size_t nsz;
+		int rc;
 
+		if (sz == 0)
+			sz = 1;
+		if (sz > MAXSYSCTLSZ) {
+			if (!aflag) {
+				(void)fprintf(stderr,
+				    "sysctl: %s: value too large\n", name);
+				errs++;
+			}
+			return;
+		}
 		buf = malloc(sz);
 		if (buf == NULL) {
-			warn("sysctl: %s", name);
-			errs++;
+			if (!aflag) {
+				warn("sysctl: %s", name);
+				errs++;
+			}
 			return;
 		}
 
-		if (sysctlbyname(name, buf, &sz, NULL, 0) == -1) {
-			warn("sysctl: %s", name);
+		rc = sysctlbyname(name, buf, &sz, NULL, 0);
+		if (rc == -1 && errno == ENOMEM) {
+			/* Value grew since the size probe; retry once. */
+			void *nbuf = realloc(buf, sz);
+			if (nbuf != NULL) {
+				buf = nbuf;
+				rc = sysctlbyname(name, buf, &sz, NULL, 0);
+			}
+		}
+		if (rc == -1) {
+			if (!aflag) {
+				warn("sysctl: %s", name);
+				errs++;
+			}
 			free(buf);
-			errs++;
 			return;
 		}
 
 		/* Determine type for formatting. */
 		type = 0;
-		nsz = sizeof(node);
-		miblen = CTL_MAXNAME;
-		if (sysctlnametomib(name, mib, &miblen) == 0 &&
-		    sysctl(mib, miblen, &node, &nsz, NULL, 0) == 0)
-			type = SYSCTL_TYPE(node.sysctl_flags);
+		{
+			struct sysctlnode *node;
+			if (resolve_node(name, mib, NULL, &node) == 0)
+				type = SYSCTL_TYPE(node->sysctl_flags);
+		}
 
 		if (!nflag)
 			(void)printf("%s = ", name);
@@ -244,11 +293,17 @@ get_value(const char *name)
 		} else {
 			switch (type) {
 			case CTLTYPE_INT:
-				(void)printf("%d\n", *(int *)buf);
+				if (sz >= sizeof(int))
+					(void)printf("%d\n", *(int *)buf);
+				else
+					hex_dump(buf, sz);
 				break;
 			case CTLTYPE_QUAD:
-				(void)printf("%" PRId64 "\n",
-				    *(int64_t *)buf);
+				if (sz >= sizeof(int64_t))
+					(void)printf("%" PRId64 "\n",
+					    *(int64_t *)buf);
+				else
+					hex_dump(buf, sz);
 				break;
 			case CTLTYPE_STRING:
 				(void)printf("%s\n", (char *)buf);
@@ -277,30 +332,21 @@ static void
 set_value(const char *name, const char *value)
 {
 	int mib[CTL_MAXNAME];
-	size_t miblen, type;
-	struct sysctlnode node;
-	size_t sz, nsz;
+	size_t miblen, sz;
+	u_int type;
+	struct sysctlnode *node;
 	void *obuf, *nbuf;
 	int rc;
 
-	miblen = CTL_MAXNAME;
-	if (sysctlnametomib(name, mib, &miblen) == -1) {
+	if (resolve_node(name, mib, &miblen, &node) == -1) {
 		(void)fprintf(stderr,
 		    "sysctl: unknown oid '%s'\n", name);
 		errs++;
 		return;
 	}
 
-	/* Get node info for type and size. */
-	nsz = sizeof(node);
-	if (sysctl(mib, miblen, &node, &nsz, NULL, 0) == -1) {
-		warn("sysctl: %s", name);
-		errs++;
-		return;
-	}
-
-	type = SYSCTL_TYPE(node.sysctl_flags);
-	sz = node.sysctl_size;
+	type = SYSCTL_TYPE(node->sysctl_flags);
+	sz = node->sysctl_size;
 
 	/* Read old value. */
 	obuf = malloc(sz > 0 ? sz : 1024);
@@ -310,7 +356,7 @@ set_value(const char *name, const char *value)
 		return;
 	}
 
-	sz = node.sysctl_size > 0 ? node.sysctl_size : 1024;
+	sz = node->sysctl_size > 0 ? node->sysctl_size : 1024;
 	if (sysctl(mib, miblen, obuf, &sz, NULL, 0) == -1) {
 		warn("sysctl: %s", name);
 		free(obuf);
@@ -340,12 +386,12 @@ set_value(const char *name, const char *value)
 		switch (type) {
 		case CTLTYPE_INT:
 		case CTLTYPE_QUAD:
-			nsz = node.sysctl_size;
+			nsz = node->sysctl_size;
 			break;
 		case CTLTYPE_STRING:
 			nsz = strlen(value) + 1;
-			if (nsz > node.sysctl_size &&
-			    node.sysctl_size != 0) {
+			if (nsz > node->sysctl_size &&
+			    node->sysctl_size != 0) {
 				(void)fprintf(stderr,
 				    "sysctl: string too long for %s\n", name);
 				errs++;
@@ -435,7 +481,7 @@ print_value(const char *name, int *mib, size_t miblen, u_int type)
 	if (sz == 0) {
 		sysctl(mib, miblen, NULL, &sz, NULL, 0);
 	}
-	if (sz == 0 || sz > 65536)
+	if (sz == 0 || sz > MAXSYSCTLSZ)
 		return;
 
 	buf = malloc(sz);
@@ -457,10 +503,16 @@ print_value(const char *name, int *mib, size_t miblen, u_int type)
 	} else {
 		switch (type) {
 		case CTLTYPE_INT:
-			(void)printf("%d\n", *(int *)buf);
+			if (sz >= sizeof(int))
+				(void)printf("%d\n", *(int *)buf);
+			else
+				hex_dump(buf, sz);
 			break;
 		case CTLTYPE_QUAD:
-			(void)printf("%" PRId64 "\n", *(int64_t *)buf);
+			if (sz >= sizeof(int64_t))
+				(void)printf("%" PRId64 "\n", *(int64_t *)buf);
+			else
+				hex_dump(buf, sz);
 			break;
 		case CTLTYPE_STRING:
 			(void)printf("%s\n", (char *)buf);
@@ -561,7 +613,7 @@ usage(void)
 {
 
 	(void)fprintf(stderr,
-	    "usage: sysctl [-bnwrx] [name[=value] ...]\n"
+	    "usage: sysctl [-bdnqrwx] [name[=value] ...]\n"
 	    "       sysctl [-bnrx] -a\n");
 	exit(1);
 }

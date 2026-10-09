@@ -26,22 +26,22 @@
 #include <sys/param.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
-#include <sys/utsname.h>
+#include <sys/statvfs.h>
 
 #include <ufs/ufs/ufsmount.h>
 
-#include <ctype.h>
 #include <err.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <fstab.h>
-#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
 #include "pathnames.h"
+
+#define MNT_FAKEFLAG	0x1	/* -f: parse only */
+#define MNT_UPDATEFLAG	0x2	/* -u: remount */
 
 static int	debug, verbose, force;
 
@@ -50,8 +50,8 @@ static int	 do_mount(const char *, const char *, const char *,
 		    int, const char *);
 static int	 do_mount_netbsd(const char *, const char *, const char *,
 		    int, const char *);
-static int	 list_mounts(void);
-static int	 mount_all(int);
+static int	list_mounts(void);
+static int	mount_all(int, int);
 static int	 has_option(const char *, const char *);
 static void	 append_option(char **, const char *);
 static int	 update_mount(const char *, int, const char *);
@@ -72,7 +72,7 @@ main_mount(int argc, char *argv[])
 	spec = NULL;
 	node = NULL;
 
-	while ((ch = getopt(argc, argv, "AadFfo:t:uv")) != -1)
+	while ((ch = getopt(argc, argv, "AadFfo:rt:uvw")) != -1)
 		switch (ch) {
 		case 'A':
 			all = 1;
@@ -89,7 +89,7 @@ main_mount(int argc, char *argv[])
 			break;
 		case 'f':
 			/* Fake mode: parse only, don't mount. */
-			flags |= 1;
+			flags |= MNT_FAKEFLAG;
 			break;
 		case 'o':
 			append_option(&options, optarg);
@@ -102,7 +102,7 @@ main_mount(int argc, char *argv[])
 			break;
 		case 'u':
 			/* Update mode: remount with new options. */
-			flags |= 2;
+			flags |= MNT_UPDATEFLAG;
 			break;
 		case 'v':
 			verbose++;
@@ -124,14 +124,14 @@ main_mount(int argc, char *argv[])
 	 */
 	if (argc == 0) {
 		if (all)
-			return mount_all(force);
+			return mount_all(force, flags);
 		return list_mounts();
 	}
 
 	/*
 	 * Update mode: mount -u [-o options] node
 	 */
-	if (flags & 2) {
+	if (flags & MNT_UPDATEFLAG) {
 		if (argc != 1)
 			usage();
 		return update_mount(argv[0], flags, options);
@@ -156,8 +156,9 @@ main_mount(int argc, char *argv[])
 			node = fs->fs_file;
 			if (fstype == NULL && fs->fs_vfstype != NULL)
 				fstype = fs->fs_vfstype;
-			if (options == NULL && fs->fs_mntops != NULL)
-				options = strdup(fs->fs_mntops);
+			if (options == NULL && fs->fs_mntops != NULL &&
+				    (options = strdup(fs->fs_mntops)) == NULL)
+				err(1, NULL);
 		}
 		break;
 	case 2:
@@ -201,11 +202,11 @@ do_mount(const char *fstype, const char *spec, const char *node,
 	}
 
 	mntflags = 0;
+	if (flags & MNT_UPDATEFLAG)
+		mntflags |= MNT_UPDATE;
 	if (options != NULL) {
 		if (has_option(options, "ro"))
 			mntflags |= MNT_RDONLY;
-		if (has_option(options, "noauto"))
-			; /* handled by mount_all */
 		if (has_option(options, "nosuid"))
 			mntflags |= MNT_NOSUID;
 		if (has_option(options, "nodev"))
@@ -236,14 +237,13 @@ do_mount_netbsd(const char *fstype, const char *spec, const char *node,
 	struct ufs_args args;
 	int ret;
 
-	if (strcmp(fstype, "ffs") == 0 || strcmp(fstype, "ufs") == 0) {
-		(void)memset(&args, 0, sizeof(args));
-		args.fspec = (char *)spec;
-		ret = mount(fstype, node, mntflags, &args,
-		    sizeof(args));
-	} else {
-		ret = mount(fstype, node, mntflags, NULL, 0);
-	}
+	/*
+	 * ffs and its siblings (msdos, cd9660, ext2fs, …) all take
+	 * struct ufs_args with the special device as fspec.
+	 */
+	(void)memset(&args, 0, sizeof(args));
+	args.fspec = __UNCONST(spec);
+	ret = mount(fstype, node, mntflags, &args, sizeof(args));
 
 	if (ret == -1) {
 		warn("mount %s on %s", spec, node);
@@ -305,7 +305,7 @@ list_mounts(void)
  * Mount all filesystems from fstab.
  */
 static int
-mount_all(int forceall)
+mount_all(int forceall, int flags)
 {
 	struct fstab *fs;
 	int ret, error;
@@ -315,9 +315,9 @@ mount_all(int forceall)
 	while ((fs = getfsent()) != NULL) {
 		const char *spec, *node, *fstype, *opts;
 
-		if (strcmp(fs->fs_type, FSTAB_RO) == 0 ||
-		    strcmp(fs->fs_type, FSTAB_RW) == 0 ||
-		    strcmp(fs->fs_type, FSTAB_RQ) == 0)
+		if (strcmp(fs->fs_type, FSTAB_RO) != 0 &&
+		    strcmp(fs->fs_type, FSTAB_RW) != 0 &&
+		    strcmp(fs->fs_type, FSTAB_RQ) != 0)
 			continue;
 
 		if (!forceall && has_option(fs->fs_mntops, "noauto"))
@@ -333,6 +333,11 @@ mount_all(int forceall)
 			int count, j, found = 0;
 
 			count = getmntinfo(&mntbuf, MNT_NOWAIT);
+			if (count == -1) {
+				warn("getmntinfo");
+				ret = 1;
+				continue;
+			}
 			for (j = 0; j < count; j++) {
 				if (strcmp(mntbuf[j].f_mntonname, node) == 0) {
 					found = 1;
@@ -348,7 +353,7 @@ mount_all(int forceall)
 		}
 
 		opts = fs->fs_mntops;
-		error = do_mount(fstype, spec, node, 0, opts);
+		error = do_mount(fstype, spec, node, flags, opts);
 		if (error)
 			ret = 1;
 	}
@@ -383,27 +388,21 @@ update_mount(const char *name, int flags, const char *options)
 
 	return do_mount(mntbuf[i].f_fstypename,
 	    mntbuf[i].f_mntfromname, mntbuf[i].f_mntonname,
-	    flags | 2, options);
+	    flags | MNT_UPDATEFLAG, options);
 }
 
 /*
- * Check if a comma-separated option string contains a specific option.
+ * Check if a comma-separated option string contains a specific option
+ * (exact token match; negated forms like "nodev" are queried as-is).
  */
 static int
 has_option(const char *options, const char *option)
 {
 	char	*optbuf, *opt, *saveptr;
-	int	 negative, found;
-	size_t	olen;
+	int	 found;
 
 	if (options == NULL)
 		return 0;
-
-	olen = strlen(option);
-	if (options[0] == 'n' && options[1] == 'o')
-		negative = 1;
-	else
-		negative = 0;
 
 	optbuf = strdup(options);
 	if (optbuf == NULL)
@@ -412,15 +411,10 @@ has_option(const char *options, const char *option)
 	found = 0;
 	for (opt = strtok_r(optbuf, ",", &saveptr); opt != NULL;
 	    opt = strtok_r(NULL, ",", &saveptr)) {
-		int oneg = 0;
-		const char *oname = opt;
-
-		if (opt[0] == 'n' && opt[1] == 'o') {
-			oneg = 1;
-			oname += 2;
+		if (strcmp(opt, option) == 0) {
+			found = 1;
+			break;
 		}
-		if (strcmp(oname, option) == 0)
-			found = (oneg == negative) ? 0 : 1;
 	}
 	free(optbuf);
 	return found;
@@ -436,13 +430,12 @@ append_option(char **options, const char *opt)
 
 	if (*options != NULL) {
 		if (asprintf(&newopts, "%s,%s", *options, opt) == -1)
-			newopts = NULL;
-		else {
-			free(*options);
-			*options = newopts;
-		}
+			err(1, NULL);
+		free(*options);
+		*options = newopts;
 	} else {
-		*options = strdup(opt);
+		if ((*options = strdup(opt)) == NULL)
+			err(1, NULL);
 	}
 }
 
@@ -454,7 +447,8 @@ usage(void)
 {
 
 	(void)fprintf(stderr,
-	    "Usage: mount [-Aadfvw] [-o options] [-t fstype] "
-	    "[special node]\n");
+	    "usage: mount [-Aadfruvw] [-o options] [-t fstype] "
+	    "[special-node | node]\n"
+	    "usage: mount -u [-o options] node\n");
 	exit(1);
 }
