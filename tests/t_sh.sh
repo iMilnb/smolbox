@@ -40,6 +40,24 @@ t_out "unset" "[]" "$S" -c 'x=1; unset x; echo "[$x]"'
 t_out "set and positional" "2 b" "$S" -c 'set -- a b; echo $# $2'
 t_out "at-var" "a b" "$S" -c 'set -- a b; echo "$@"'
 
+# --- command substitution
+t_out "cmdsub simple" "hi" "$S" -c 'echo "$(echo hi)"'
+t_out "cmdsub unquoted strips nl" "hi" "$S" -c 'echo $(echo hi)'
+t_out "cmdsub in assignment" "x=hi" "$S" -c 'v=$(echo hi); echo x=$v'
+t_out "cmdsub nested parens" "a b" "$S" -c 'echo $(echo "a b")'
+t_out "cmdsub status" "3" "$S" -c 'sh -c "exit 3"; echo $?'
+
+# --- parameter expansion
+t_out "prefix strip #" "foo" "$S" -c 'v=/tmp/foo; echo ${v#/tmp/}'
+t_out "prefix strip ##" "c" "$S" -c 'v=a/b/c; echo ${v##*/}'
+t_out "suffix strip %" "a/b" "$S" -c 'v=a/b/c; echo ${v%/*}'
+t_out "suffix strip %%" "a" "$S" -c 'v=a/b/c; echo ${v%%/*}'
+t_out "default :- on unset" "dflt" "$S" -c 'echo ${nope:-dflt}'
+t_out "default :- keeps set" "keep" "$S" -c 'v=keep; echo ${v:-dflt}'
+t_out "alt :+ on set" "yes" "$S" -c 'v=x; echo ${v:+yes}'
+t_out "length #" "5" "$S" -c 'v=hello; echo ${#v}'
+t_out "strip pattern glob" "txt" "$S" -c 'v=foo.txt; echo ${v##*.}'
+
 # --- control flow
 t_out "and list" "yes" "$S" -c 'true && echo yes'
 t_out "or list" "yes" "$S" -c 'false || echo yes'
@@ -98,6 +116,31 @@ t_out "cd builtin" "/tmp" "$S" -c 'cd /tmp; pwd'
 t_out "colon builtin" "" "$S" -c ':'
 t_grep "type builtin" "echo" "$S" -c 'type echo'
 t_grep "printenv builtin" "^PATH=" "$S" -c 'printenv'
+
+# --- basicrc idioms (service/common/basicrc constructs)
+printf 'SOURCED=ok\n' > src1.sh
+t_out "dot-source sets var" "ok" "$S" -c '. ./src1.sh; echo $SOURCED'
+t_out "dot-source guard missing" "missing" "$S" -c '[ -f nofile ] && . ./nofile || echo missing'
+printf 'V=here\n' > g.sh
+t_out "dot-source guard present" "here" "$S" -c '[ -f g.sh ] && . ./g.sh || echo missing; echo $V'
+t_out "subshell group" "in" "$S" -c '(echo in)'
+t_out "subshell var isolation" "outside" "$S" -c 'v=outside; (v=inside); echo $v'
+t_out "subshell cd no leak" "yes" "$S" -c 'd=$PWD; (cd /tmp); [ "$PWD" = "$d" ] && echo yes'
+t_out "cd - returns to prev" "$PWD" "$S" -c 'cd /tmp >/dev/null 2>&1; cd - >/dev/null 2>&1; pwd'
+t_out "cmdsub in if test" "match" "$S" -c 'if [ "$(echo md0)" = "md0" ]; then echo match; fi'
+t_out "grep -q branch" "found" "$S" -c 'echo hello | grep -q hello && echo found || echo no'
+sc "mini basicrc flow" "ok" <<'EOS'
+export HOME=/
+umask 022
+if [ "$(echo md0)" = "md0" ]; then R=md0; fi
+[ -f nosuch ] && . nosuch || R2=skip
+( echo hi > ./mkrk )
+[ -f ./mkrk ] && R3=ok
+if [ "$R" = md0 ] && [ "$R2" = skip ] && [ "$R3" = ok ]; then
+	echo ok
+fi
+rm -f ./mkrk
+EOS
 
 # --- robustness regressions
 t_in "empty lines do not crash" 0 "\n\n\n" "$S"

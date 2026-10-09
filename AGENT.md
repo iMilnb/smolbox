@@ -31,7 +31,7 @@ Each tool's entry point is `main_<name>()`, NOT `main()`.
 smolbox.c              ← dispatcher (argv[0] → main_<tool>, argv[1] fallback)
 Makefile               ← single bsd.prog.mk, all SRCS listed
 bin/ls/ls.c            ← one tool per directory
-bin/sh/                ← multi-file tool (8 .c + 1 .h)
+bin/sh/                ← vendored dash (config.h + signames.c are host-generated)
 sbin/init/             ← init.c + pathnames.h
 sbin/mount/            ← mount.c + pathnames.h
 sbin/sysctl/           ← sysctl.c (standalone)
@@ -121,30 +121,33 @@ tests/                 ← run.sh (guest driver), run-vm.sh (host), t_<tool>.sh
 - Skips `.` and `..` (POSIX requirement)
 - `-f` ignores nonexistent files and suppresses prompts
 
-### sh (`bin/sh/`, 3817 lines, 8 .c + 1 .h)
+### sh (`bin/sh/`, dash 0.5.13.5, vendored)
 
-A minimal POSIX-ish shell written for smolbox (not a port of 4.3BSD-Reno `sh`).
+`bin/sh/` is **dash** (http://gondor.apana.org.au/~herbert/dash/), vendored and
+built with `--enable-smallest` semantics (`SMALL=1`: no line editing, no jobs).
+It is a full POSIX shell, so it can source smolBSD's `service/common/basicrc`.
 
-- **Multi-file tool** — all sources listed individually in Makefile SRCS
-- `defs.h`: shared types (`struct cmd`, `struct lexer`, `struct redirect`), all function declarations, extern globals (`parse_error`, `noexec`, `exit_status`)
-- `sh.c`: `main_sh()`, signal setup, `run_text()` (used by `-c` and scripts), `execute_script()`, `read_eval_loop()`, `read_line()`; `-c`/`-n`/`-x`/`-v` flags
-- `lexer.c`: tokenizer. Words keep quotes/`$`/escapes RAW (expansion is deferred). `${...}` and `$((...))` are captured inside the word (brace/paren are otherwise operators)
-- `parser.c`: recursive descent → AST (`N_CMD`, `N_PIPE`, `N_LIST`, `N_AND`, `N_OR`, `N_IF`, `N_WHILE`, `N_FOR`). Stores raw words; sets global `parse_error` on a missing `then`/`fi`/`do`/`done`. `parse_list` treats newline like `;` and stops at reserved words
-- `exec.c`: `execute()` walks the AST. `build_argv()` does the real work at EXEC time: expand words, apply leading `name=value` assignments, glob. Builtins run in-process (so `cd`/vars persist) with stdin/stdout saved+restored around redirections; externals fork+exec. `exec_pipe()` forks every stage and wires pipes. `exec_for()` iterates words/positionals
-- `builtin.c`: 17 builtins (`:`, `[`, `cd`, `echo`, `exit`, `export`, `false`, `hash`, `printenv`, `pwd`, `set`, `test`, `true`, `type`, `umask`, `unset`, `wait`). `[` is `test` with a trailing `]`. `test` supports string (`=`/`!=`) and numeric (`-eq`/`-ne`/`-lt`/`-le`/`-gt`/`-ge`) ops; a binary op missing an operand returns 2
-- `var.c`: hash table (64 buckets, djb2). `expand()` strips quotes (single=literal, double=allow `$` + limited escapes), expands `$var`/`${var}`/`$(( ))` (integer arithmetic)/`$?`/`$$`/`$@`/`$#`/`$!`/`$0-9`. `var_get()` always returns an owned copy
-- `glob.c`: `*`, `?`, `[abc]`/`[a-z]`/`[!x]` expansion, results sorted (POSIX order)
-- `redirect.c`: redirect node creation/freeing (apply logic lives in `exec.c:apply_redirects`)
-
-**Key gotchas**:
-- **Expansion is at EXEC time, not parse time.** The parser stores raw words; `build_argv()` expands them. This is what makes `x=5; echo $x`, `for i in ...; do echo $i`, and `i=$((i+1))` work.
-- **`fflush(stdout/stderr)` before every `_exit()` in a child and before restoring fds around a builtin.** stdio output is buffered; `_exit()` skips the flush, so without it pipes come out empty and a builtin's redirected output leaks to the terminal.
-- `exit_status` (the global `$?` reads) is set in `exec_simple`/`exec_pipe`; the AST's `&&`/`||` short-circuit returns rely on it.
-- Script args: `$0` is the script name; `var_set_positional(argc-1, argv+1)` so `$1` is the first real arg.
-- `ignoreeof = false` (exits on first EOF, avoids infinite prompt loop)
-- `.profile` only sourced when `isatty(STDIN_FILENO)` (avoids consuming pipe input)
-- `SIGCHLD` is blocked (not used for reaping — `wait_child` uses `waitpid` directly)
-- Non-static symbols in sh (`var_*`, `execute`, `lexer_*`, etc.) must not clash with other tools
+- **Wiring**: dash's `main()` is renamed to `main_sh()` in `main.c` to match the
+  dispatcher (`apps[]` maps `"sh"` → `main_sh`). Every `.c` begins with
+  `#include "config.h"`. Makefile adds `-I bin/sh -I bin/sh/bltin
+  -DHAVE_CONFIG_H -DSHELL` (`-DSHELL` is required or `bltin.h` skips the
+  internal headers).
+- **Generated files**: `builtins.c`, `init.c`, `nodes.c`, `syntax.c`, `token.h`,
+  `token_vars.h` are derived from dash source only (portable, safe to vendor).
+- **Host-dependent — regenerate on NetBSD, never hand-port**:
+  - `config.h` from dash `./configure --enable-smallest` on NetBSD (maps
+    `stat64`/`fstat64`/`readdir64`/`glob64` → NetBSD names, sets `SMALL=1`).
+  - `signames.c` from dash `src/mksignames` on NetBSD (the `signal_names[]`
+    table is sized `NSIG+1` and depends on the platform `<signal.h>`; the Linux
+    table overflows NetBSD's `NSIG=64` → "excess elements in array initializer").
+- **Local patches**: `expand.c` guards `#define GLOB_ALTDIRFUNC 0` with
+  `#ifndef GLOB_ALTDIRFUNC` (collides with `system.h`'s self-contained-glob
+  define on non-glibc). `main.c` `main`→`main_sh`.
+- **Gotcha**: dash uses a hand-written `arith_yacc.c` — no bison/yacc needed at
+  build time.
+- **Gotcha**: non-static dash symbols (`expand`, `parsefile`, `evalcommand`, …)
+  share the binary with the other applets; they currently don't clash, but check
+  before bumping dash.
 
 ### sysctl (`sbin/sysctl/sysctl.c`, 567 lines)
 
@@ -189,8 +192,10 @@ rm .fast                      # back to the faithful -O2 -Werror build
   reports no free space) and runs `make clean` first (copied `.o` files share an
   mtime and would otherwise be treated as up to date).
 - **Always validate with the `-O2` build** (no `.fast`) before considering work done.
-- Quick host-side syntax check (no VM needed; glibc has `strlcpy`):
-  `gcc -fsyntax-only -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Ibin/sh -I. bin/sh/<file>.c`
+- Quick host-side syntax check (no VM needed; glibc has `strlcpy`). For dash
+  sources the flags must match the Makefile:
+  `gcc -fsyntax-only -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -DHAVE_CONFIG_H -DSHELL -Ibin/sh -Ibin/sh/bltin -I. bin/sh/<file>.c`
+  (host glibc differs from NetBSD, so this only catches typos — trust the VM build).
 - `t_mount` skips its ffs round-trip when `newfs` is absent from the dev image.
 
 ## Adding Tools — Checklist
